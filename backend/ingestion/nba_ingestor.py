@@ -220,8 +220,12 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None) -> in
             for _, p in player_df.iterrows():
                 stat_id = f"{game_id}_{p['PLAYER_ID']}"
                 conn.execute("""
-                    INSERT OR REPLACE INTO player_game_stats VALUES
-                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
+                    INSERT OR REPLACE INTO player_game_stats
+                        (stat_id, game_id, player_id, team_id, season,
+                         min, pts, reb, ast, stl, blk, tov,
+                         fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
+                         ftm, fta, ft_pct, plus_minus, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
                 """, [
                     stat_id, game_id, int(p["PLAYER_ID"]), int(p["TEAM_ID"]), season,
                     p.get("MIN"), _safe_int(p, "PTS"), _safe_int(p, "REB"),
@@ -242,8 +246,12 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None) -> in
                 is_home = home_row and int(t["TEAM_ID"]) == home_row[0]
 
                 conn.execute("""
-                    INSERT OR REPLACE INTO team_game_stats VALUES
-                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
+                    INSERT OR REPLACE INTO team_game_stats
+                        (stat_id, game_id, team_id, season, is_home,
+                         min, pts, reb, ast, stl, blk, tov,
+                         fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
+                         ftm, fta, ft_pct, plus_minus, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
                 """, [
                     stat_id, game_id, int(t["TEAM_ID"]), season, is_home,
                     t.get("MIN"), _safe_int(t, "PTS"), _safe_int(t, "REB"),
