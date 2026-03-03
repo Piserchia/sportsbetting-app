@@ -24,8 +24,9 @@ from backend.db.connection import get_connection
 
 logger = logging.getLogger(__name__)
 
-NBA_API_DELAY = float(os.getenv("NBA_API_DELAY", "1.0"))
+NBA_API_DELAY = float(os.getenv("NBA_API_DELAY", "3.0"))
 NBA_SEASONS = os.getenv("NBA_SEASONS", "2024-25").split(",")
+NBA_API_MAX_RETRIES = int(os.getenv("NBA_API_MAX_RETRIES", "5"))
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,20 @@ def _log_ingestion(conn, source: str, entity: str, records: int, status: str, me
 
 def _sleep():
     time.sleep(NBA_API_DELAY)
+
+
+def _fetch_with_retry(fn, *args, **kwargs):
+    """Call an nba_api endpoint with exponential backoff on timeout/error."""
+    for attempt in range(1, NBA_API_MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            is_last = attempt == NBA_API_MAX_RETRIES
+            wait = NBA_API_DELAY * (2 ** attempt)  # 6s, 12s, 24s, 48s, 96s
+            if is_last:
+                raise
+            logger.warning(f"  Attempt {attempt}/{NBA_API_MAX_RETRIES} failed: {e}. Retrying in {wait:.0f}s...")
+            time.sleep(wait)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +134,7 @@ def ingest_games(seasons: Optional[list] = None, conn=None) -> int:
         logger.info(f"Ingesting games for season {season}...")
         try:
             _sleep()
-            gamelog = leaguegamelog.LeagueGameLog(
+            gamelog = _fetch_with_retry(leaguegamelog.LeagueGameLog,
                 season=season,
                 season_type_all_star="Regular Season",
                 league_id="00"
@@ -213,7 +228,11 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None) -> in
         game_id = row["game_id"]
         try:
             _sleep()
-            box = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id)
+            box = _fetch_with_retry(
+                boxscoretraditionalv2.BoxScoreTraditionalV2,
+                game_id=game_id,
+                timeout=60
+            )
             player_df = box.player_stats.get_data_frame()
             team_df = box.team_stats.get_data_frame()
 
