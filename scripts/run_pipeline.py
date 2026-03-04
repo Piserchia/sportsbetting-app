@@ -24,6 +24,10 @@ from backend.ingestion.nba_ingestor import (
     ingest_teams, ingest_players, ingest_games, ingest_box_scores
 )
 from backend.ingestion.odds_ingestor import ingest_odds
+from backend.ingestion.game_log_sync import sync_game_logs
+from backend.models.feature_builder import build_player_features
+from backend.models.projection_model import generate_projections
+from backend.models.simulation_engine import simulate_player_props
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -48,6 +52,13 @@ def run_pipeline(skip_box_scores: bool = False):
                 ingest_box_scores(season.strip(), conn=conn)
 
         ingest_odds(conn=conn)
+
+        # Model pipeline
+        logger.info("Running model pipeline...")
+        sync_game_logs(conn=conn)
+        build_player_features(conn=conn)
+        generate_projections(conn=conn)
+        simulate_player_props(conn=conn)
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}")

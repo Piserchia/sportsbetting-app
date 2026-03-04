@@ -152,3 +152,95 @@ def init_schema(conn: duckdb.DuckDBPyConnection):
     """)
 
     logger.info("Schema initialization complete.")
+
+
+def init_model_schema(conn: duckdb.DuckDBPyConnection):
+    """Create model pipeline tables if they don't already exist."""
+    logger.info("Initializing model schema...")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_game_logs (
+            game_id             TEXT,
+            player_id           TEXT,
+            game_date           DATE,
+            team                TEXT,
+            minutes             DOUBLE,
+            points              DOUBLE,
+            rebounds            DOUBLE,
+            assists             DOUBLE,
+            steals              DOUBLE,
+            blocks              DOUBLE,
+            turnovers           DOUBLE,
+            fg_attempts         DOUBLE,
+            three_attempts      DOUBLE,
+            free_throw_attempts DOUBLE,
+            PRIMARY KEY (game_id, player_id)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_features (
+            game_id             TEXT,
+            player_id           TEXT,
+            points_avg_last_5   DOUBLE,
+            points_avg_last_10  DOUBLE,
+            rebounds_avg_last_10 DOUBLE,
+            assists_avg_last_10 DOUBLE,
+            minutes_avg_last_10 DOUBLE,
+            minutes_trend       DOUBLE,
+            season_avg_points   DOUBLE,
+            PRIMARY KEY (game_id, player_id)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_projections (
+            game_id             TEXT,
+            player_id           TEXT,
+            points_mean         DOUBLE,
+            rebounds_mean       DOUBLE,
+            assists_mean        DOUBLE,
+            minutes_projection  DOUBLE,
+            PRIMARY KEY (game_id, player_id)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_distributions (
+            game_id     TEXT,
+            player_id   TEXT,
+            stat        TEXT,
+            mean        DOUBLE,
+            std_dev     DOUBLE,
+            PRIMARY KEY (game_id, player_id, stat)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_simulations (
+            game_id     TEXT,
+            player_id   TEXT,
+            stat        TEXT,
+            line        DOUBLE,
+            probability DOUBLE,
+            PRIMARY KEY (game_id, player_id, stat, line)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prop_edges (
+            game_id             TEXT,
+            player_id           TEXT,
+            stat                TEXT,
+            line                DOUBLE,
+            sportsbook_odds     DOUBLE,
+            model_probability   DOUBLE,
+            fair_odds           DOUBLE,
+            expected_value      DOUBLE,
+            edge_percent        DOUBLE,
+            book                TEXT,
+            PRIMARY KEY (game_id, player_id, stat, line, book)
+        )
+    """)
+
+    logger.info("Model schema initialization complete.")
