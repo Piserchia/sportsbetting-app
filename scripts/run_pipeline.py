@@ -24,6 +24,7 @@ from backend.ingestion.nba_ingestor import (
     ingest_teams, ingest_players, ingest_games, ingest_box_scores
 )
 from backend.ingestion.odds_ingestor import ingest_odds
+from backend.ingestion.props_ingestor import ingest_props
 from backend.ingestion.game_log_sync import sync_game_logs
 from backend.models.feature_builder import build_player_features
 from backend.models.projection_model import generate_projections
@@ -52,6 +53,7 @@ def run_pipeline(skip_box_scores: bool = False):
                 ingest_box_scores(season.strip(), conn=conn)
 
         ingest_odds(conn=conn)
+        ingest_props(conn=conn)
 
         # Model pipeline
         logger.info("Running model pipeline...")

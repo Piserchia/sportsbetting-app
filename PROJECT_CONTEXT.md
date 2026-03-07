@@ -26,8 +26,14 @@ NBA stats → features → projections → simulations → probabilities → EV
 - Retry logic + exponential backoff on NBA.com rate limiting
 - Full pipeline runner with optional scheduling
 
+### ✅ Done (continued)
+- SportsGameOdds props ingestor scaffolded (`backend/ingestion/props_ingestor.py`)
+  - Awaiting API key to activate
+  - `sportsbook_props` table created
+  - `calculate_edges.py` updated to read from `sportsbook_props`
+
 ### 🔲 Next Up
-- **SportsGameOdds API integration** for player prop lines (decided over The Odds API for props)
+- **Activate SportsGameOdds** — sign up, get key, add `SPORTSGAMEODDS_API_KEY` to `.env`, run `python scripts/ingest_props.py`
 - **FastAPI REST layer** (`backend/api/app.py` is empty placeholder)
 - **Frontend dashboard** (not started)
 - **Deployment / scheduling** on a server (not started)
@@ -60,7 +66,8 @@ sportsbetting-app/
 │   ├── ingestion/
 │   │   ├── nba_ingestor.py       # nba_api: teams, players, games, box scores
 │   │   ├── odds_ingestor.py      # The Odds API: spreads, moneylines, totals
-│   │   └── game_log_sync.py      # Bridges player_game_stats → player_game_logs
+│   │   ├── game_log_sync.py      # Bridges player_game_stats → player_game_logs
+│   │   └── props_ingestor.py     # SportsGameOdds: player prop lines (needs API key)
 │   │
 │   ├── models/
 │   │   ├── feature_builder.py    # Rolling window features from game logs
@@ -74,6 +81,7 @@ sportsbetting-app/
 │   ├── init_db.py                # One-time DB setup
 │   ├── ingest_nba.py             # Pull NBA data (run with --season 2025-26)
 │   ├── ingest_odds.py            # Pull game odds (requires ODDS_API_KEY)
+│   ├── ingest_props.py           # Pull prop lines (requires SPORTSGAMEODDS_API_KEY)
 │   ├── build_features.py         # Sync logs + compute rolling features
 │   ├── run_projections.py        # Weighted avg projections + distributions
 │   ├── simulate_props.py         # Monte Carlo sims → probability ladders
@@ -140,6 +148,7 @@ python scripts/run_pipeline.py --schedule        # runs daily 6am + odds refresh
 
 ```
 DB_PATH=data/sportsbetting.db
+SPORTSGAMEODDS_API_KEY=your_key    # https://sportsgameodds.com — player props
 ODDS_API_KEY=your_key_here         # https://the-odds-api.com — free tier 500 req/mo
 NBA_API_DELAY=3.0                  # seconds between nba_api calls (increase if timeouts)
 NBA_API_MAX_RETRIES=5              # retries with exponential backoff on timeout
@@ -200,11 +209,13 @@ LOG_LEVEL=INFO
 
 When picking this up in a new context window, the next things to build are:
 
-1. **SportsGameOdds props ingestor** (`backend/ingestion/props_ingestor.py`)
-   - Fetch player prop lines per game
-   - Map to `player_id` via player name matching
-   - Write to `sportsbook_odds` table (or extend existing `odds` table)
-   - Wire into `calculate_edges.py` (already scaffolded and waiting)
+1. **Activate SportsGameOdds props** (IMMEDIATE — everything is built, just needs a key)
+   - Sign up at https://sportsgameodds.com
+   - Add `SPORTSGAMEODDS_API_KEY=your_key` to `config/.env`
+   - Run `python scripts/ingest_props.py` to test
+   - Verify output with `get_available_markets()` helper
+   - After first successful run, `calculate_edges.py` will automatically switch from model-only to full EV mode
+   - **Critical TODO in `props_ingestor.py`**: confirm exact API field names (`eventID`, `playerID`, `oddID`, `overOdds`, `underOdds`, `eventDate`) match real SGO response — marked with TODO comments in the file
 
 2. **FastAPI REST layer** (`backend/api/app.py`)
    - Endpoints needed:

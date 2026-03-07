@@ -41,27 +41,27 @@ def calculate_edges(conn=None) -> int:
     conn = conn or get_connection()
     init_model_schema(conn)
 
-    # Check if we have any prop odds yet
+    # Check if sportsbook_props is populated
     try:
-        odds_count = conn.execute("""
-            SELECT COUNT(*) FROM odds WHERE market NOT IN ('h2h', 'spreads', 'totals')
-        """).fetchone()[0]
+        props_count = conn.execute(
+            "SELECT COUNT(*) FROM sportsbook_props"
+        ).fetchone()[0]
     except Exception:
-        odds_count = 0
+        props_count = 0
 
-    if odds_count == 0:
+    if props_count == 0:
         logger.warning(
-            "No prop odds found in the odds table yet. "
-            "Add SportsGameOdds ingestion to populate prop lines. "
-            "Generating edges from simulations only (no book comparison)."
+            "No prop lines found in sportsbook_props. "
+            "Run: python scripts/ingest_props.py (requires SPORTSGAMEODDS_API_KEY). "
+            "Generating model-only edges for now."
         )
         count = _write_model_only_edges(conn)
         if close:
             conn.close()
         return count
 
-    # Full edge calculation once odds are available
-    logger.info("Calculating edges against sportsbook odds...")
+    # Full edge calculation against sportsbook props
+    logger.info(f"Calculating edges against {props_count:,} sportsbook prop lines...")
 
     edges = conn.execute("""
         SELECT
@@ -69,15 +69,16 @@ def calculate_edges(conn=None) -> int:
             s.player_id,
             s.stat,
             s.line,
-            s.probability                                   AS model_probability,
-            o.home_price                                    AS sportsbook_odds,
-            o.bookmaker                                     AS book
+            s.probability               AS model_probability,
+            sp.over_odds                AS sportsbook_odds,
+            sp.book
         FROM player_simulations s
-        JOIN odds o
-            ON s.game_id = o.game_id
-            AND s.line = o.home_point
-            AND o.market = s.stat
+        JOIN sportsbook_props sp
+            ON  s.player_id = sp.player_id
+            AND s.stat      = sp.stat
+            AND s.line      = sp.line
         WHERE s.probability > 0
+          AND sp.over_odds IS NOT NULL
     """).df()
 
     if edges.empty:
