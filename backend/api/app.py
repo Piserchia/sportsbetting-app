@@ -233,36 +233,68 @@ def player_profile(player_id: int):
 
 @app.get("/players/{player_id}/game-log")
 def player_game_log(player_id: int, limit: int = 10):
-    """Last N games with opponent pace and defensive rating context."""
+    """Last N games. Falls back to player_game_stats if player_game_logs not yet populated."""
     conn = get_connection()
     try:
+        # Check if player_game_logs has data for this player
+        log_count = conn.execute(
+            "SELECT COUNT(*) FROM player_game_logs WHERE player_id = CAST(? AS TEXT)",
+            [player_id]
+        ).fetchone()[0]
+
+        if log_count > 0:
+            # Use normalized game log table (populated after build_features.py)
+            rows = conn.execute("""
+                SELECT
+                    pgl.game_id, pgl.game_date, pgl.team,
+                    pgl.minutes, pgl.points, pgl.rebounds, pgl.assists,
+                    pgl.steals, pgl.blocks, pgl.turnovers,
+                    g.home_team_abbr, g.away_team_abbr
+                FROM player_game_logs pgl
+                JOIN games g ON pgl.game_id = g.game_id
+                WHERE pgl.player_id = CAST(? AS TEXT)
+                ORDER BY pgl.game_date DESC LIMIT ?
+            """, [player_id, limit]).fetchall()
+
+            result = []
+            for r in rows:
+                home_abbr = r[10]
+                away_abbr = r[11]
+                team      = r[2]
+                is_home   = (team == home_abbr)
+                opponent  = away_abbr if is_home else home_abbr
+                matchup   = f"vs {opponent}" if is_home else f"@ {opponent}"
+                result.append({
+                    "game_id":   r[0],
+                    "date":      str(r[1]),
+                    "matchup":   matchup,
+                    "opponent":  opponent,
+                    "minutes":   safe(r[3]),
+                    "points":    safe(r[4], 0),
+                    "rebounds":  safe(r[5], 0),
+                    "assists":   safe(r[6], 0),
+                    "steals":    safe(r[7], 0),
+                    "blocks":    safe(r[8], 0),
+                    "turnovers": safe(r[9], 0),
+                })
+            return result
+
+        # Fallback: read directly from player_game_stats (raw ingestion table)
         rows = conn.execute("""
             SELECT
-                pgl.game_id,
-                pgl.game_date,
-                pgl.team,
-                pgl.minutes,
-                pgl.points,
-                pgl.rebounds,
-                pgl.assists,
-                pgl.steals,
-                pgl.blocks,
-                pgl.turnovers,
+                pgs.game_id,
+                g.game_date,
+                t.abbreviation      AS team,
+                pgs.min,
+                pgs.pts, pgs.reb, pgs.ast,
+                pgs.stl, pgs.blk, pgs.tov,
                 g.home_team_abbr,
-                g.away_team_abbr,
-                -- Opponent team stats for pace/def context
-                opp_tgs.pts   AS opp_pts_allowed,
-                g.home_score,
-                g.away_score
-            FROM player_game_logs pgl
-            JOIN games g ON pgl.game_id = g.game_id
-            JOIN player_game_stats pgs ON pgl.game_id = pgs.game_id
-                AND CAST(pgl.player_id AS INTEGER) = pgs.player_id
-            LEFT JOIN team_game_stats opp_tgs
-                ON pgl.game_id = opp_tgs.game_id
-                AND opp_tgs.team_id != pgs.team_id
-            WHERE pgl.player_id = CAST(? AS TEXT)
-            ORDER BY pgl.game_date DESC
+                g.away_team_abbr
+            FROM player_game_stats pgs
+            JOIN games g  ON pgs.game_id  = g.game_id
+            JOIN teams t  ON pgs.team_id  = t.team_id
+            WHERE pgs.player_id = ?
+            ORDER BY g.game_date DESC
             LIMIT ?
         """, [player_id, limit]).fetchall()
 
@@ -275,20 +307,26 @@ def player_game_log(player_id: int, limit: int = 10):
             opponent  = away_abbr if is_home else home_abbr
             matchup   = f"vs {opponent}" if is_home else f"@ {opponent}"
 
+            # Parse "MM:SS" minutes string to float
+            min_str = r[3] or "0:00"
+            try:
+                parts = str(min_str).split(":")
+                minutes = float(parts[0]) + float(parts[1]) / 60 if len(parts) == 2 else float(parts[0])
+            except Exception:
+                minutes = None
+
             result.append({
-                "game_id":    r[0],
-                "date":       str(r[1]),
-                "matchup":    matchup,
-                "opponent":   opponent,
-                "minutes":    safe(r[3]),
-                "points":     safe(r[4], 0),
-                "rebounds":   safe(r[5], 0),
-                "assists":    safe(r[6], 0),
-                "steals":     safe(r[7], 0),
-                "blocks":     safe(r[8], 0),
-                "turnovers":  safe(r[9], 0),
-                # Pace approximated from total possessions (pts used as proxy until pace data added)
-                "opp_pts_allowed": safe(r[12], 0),
+                "game_id":   r[0],
+                "date":      str(r[1]),
+                "matchup":   matchup,
+                "opponent":  opponent,
+                "minutes":   safe(minutes),
+                "points":    safe(r[4], 0),
+                "rebounds":  safe(r[5], 0),
+                "assists":   safe(r[6], 0),
+                "steals":    safe(r[7], 0),
+                "blocks":    safe(r[8], 0),
+                "turnovers": safe(r[9], 0),
             })
 
         return result
