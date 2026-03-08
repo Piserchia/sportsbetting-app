@@ -1,34 +1,16 @@
-# Frontend — Sports Betting Dashboard
+# React + Vite
 
-Built with React + Recharts. Dark terminal aesthetic.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Components
+Currently, two official plugins are available:
 
-### `PropDashboard.jsx`
-Main player prop analysis view. Displays:
-- Monte Carlo distribution curve with selected line marker
-- Last 10 games bar chart (colored by hit/miss vs selected line)
-- Full game log table with opponent pace + def rating
-- Alternate prop ladder with model probability, fair odds, and edge % per book
-- Matchup intelligence flags (pace, defensive rating, rest, historical matchup)
-- Model confidence indicators (sample size, minutes stability, usage)
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-## Running locally (once FastAPI is ready)
+## React Compiler
 
-```bash
-npm install
-npm run dev
-```
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-## Wiring to the backend
+## Expanding the ESLint configuration
 
-The component uses `MOCK_*` constants at the top of `PropDashboard.jsx`.
-Replace these with API calls to the FastAPI endpoints (to be built):
-
-| Mock constant       | API endpoint                              |
-|---------------------|-------------------------------------------|
-| `MOCK_PLAYER`       | `GET /players/{player_id}`                |
-| `MOCK_GAME_LOG`     | `GET /players/{player_id}/game-log`       |
-| `MOCK_SIMULATION`   | `GET /players/{player_id}/simulations`    |
-| `MOCK_PROP_LINES`   | `GET /players/{player_id}/props`          |
-| `MOCK_OPPONENT_FLAGS` | `GET /games/{game_id}/matchup-flags`   |
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
