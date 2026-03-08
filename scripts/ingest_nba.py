@@ -29,6 +29,8 @@ if __name__ == "__main__":
                         help="Max box scores to fetch per season (for testing)")
     parser.add_argument("--skip-box-scores", action="store_true",
                         help="Skip box score ingestion (faster)")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-fetch ALL box scores for the season, ignoring already-ingested games")
     args = parser.parse_args()
 
     conn = get_connection()
@@ -41,9 +43,9 @@ if __name__ == "__main__":
     ingest_games(seasons=seasons, conn=conn)
 
     if not args.skip_box_scores:
-        target_seasons = [args.season] if args.season else os.getenv("NBA_SEASONS", "2024-25").split(",")
+        target_seasons = [args.season] if args.season else os.getenv("NBA_SEASONS", "2025-26").split(",")
         for season in target_seasons:
-            ingest_box_scores(season.strip(), limit=args.box_scores_limit, conn=conn)
+            ingest_box_scores(season.strip(), limit=args.box_scores_limit, conn=conn, force=args.force)
 
     conn.close()
     print("✅ NBA ingestion complete.")

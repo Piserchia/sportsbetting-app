@@ -203,19 +203,31 @@ def ingest_games(seasons: Optional[list] = None, conn=None) -> int:
 # Box Scores (player + team level) — run after games are loaded
 # ---------------------------------------------------------------------------
 
-def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None) -> int:
+def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force: bool = False) -> int:
     """
     Fetches traditional box scores for all Final games in a given season.
     This is slow (1 API call per game) — use limit for testing.
+
+    Args:
+        force: If True, re-fetches ALL games in the season ignoring what's
+               already in player_game_stats. Use when box scores are missing
+               despite the game appearing as already ingested.
     """
     close = conn is None
     conn = conn or get_connection()
 
-    games_df = conn.execute("""
-        SELECT game_id FROM games
-        WHERE season = ? AND status = 'Final'
-        AND game_id NOT IN (SELECT DISTINCT game_id FROM player_game_stats)
-    """, [season]).df()
+    if force:
+        logger.info(f"  FORCE mode — fetching ALL Final games for {season} regardless of existing data.")
+        games_df = conn.execute("""
+            SELECT game_id FROM games
+            WHERE season = ? AND status = 'Final'
+        """, [season]).df()
+    else:
+        games_df = conn.execute("""
+            SELECT game_id FROM games
+            WHERE season = ? AND status = 'Final'
+            AND game_id NOT IN (SELECT DISTINCT game_id FROM player_game_stats)
+        """, [season]).df()
 
     if limit:
         games_df = games_df.head(limit)
