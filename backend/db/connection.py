@@ -180,15 +180,41 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS player_features (
-            game_id             TEXT,
-            player_id           TEXT,
-            points_avg_last_5   DOUBLE,
-            points_avg_last_10  DOUBLE,
-            rebounds_avg_last_10 DOUBLE,
-            assists_avg_last_10 DOUBLE,
-            minutes_avg_last_10 DOUBLE,
-            minutes_trend       DOUBLE,
-            season_avg_points   DOUBLE,
+            game_id                     TEXT,
+            player_id                   TEXT,
+            -- Rolling stat averages
+            points_avg_last_5           DOUBLE,
+            points_avg_last_10          DOUBLE,
+            rebounds_avg_last_5         DOUBLE,
+            rebounds_avg_last_10        DOUBLE,
+            assists_avg_last_5          DOUBLE,
+            assists_avg_last_10         DOUBLE,
+            season_avg_points           DOUBLE,
+            season_avg_rebounds         DOUBLE,
+            season_avg_assists          DOUBLE,
+            -- Improved minutes model
+            minutes_avg_last_5          DOUBLE,
+            minutes_avg_last_10         DOUBLE,
+            minutes_trend               DOUBLE,
+            games_started_last_5        INTEGER,
+            minutes_projection          DOUBLE,
+            blowout_risk                TEXT,
+            blowout_adjustment_factor   DOUBLE,
+            -- Pace context
+            team_pace                   DOUBLE,
+            opponent_pace               DOUBLE,
+            expected_game_pace          DOUBLE,
+            pace_adjustment_factor      DOUBLE,
+            -- Opponent defense context
+            opponent_points_allowed     DOUBLE,
+            opponent_rebounds_allowed   DOUBLE,
+            opponent_assists_allowed    DOUBLE,
+            defense_adj_pts             DOUBLE,
+            defense_adj_reb             DOUBLE,
+            defense_adj_ast             DOUBLE,
+            -- Usage
+            usage_proxy                 DOUBLE,
+            usage_trend_last_5          DOUBLE,
             PRIMARY KEY (game_id, player_id)
         )
     """)
@@ -242,5 +268,41 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             PRIMARY KEY (game_id, player_id, stat, line, book)
         )
     """)
+
+    # ── Migrate existing player_features tables ────────────────────────────
+    # Add new columns to existing tables without dropping them
+    new_feature_cols = [
+        ("rebounds_avg_last_5",         "DOUBLE",  "0.0"),
+        ("assists_avg_last_5",           "DOUBLE",  "0.0"),
+        ("season_avg_rebounds",          "DOUBLE",  "0.0"),
+        ("season_avg_assists",           "DOUBLE",  "0.0"),
+        ("minutes_avg_last_5",           "DOUBLE",  "0.0"),
+        ("games_started_last_5",         "INTEGER", "0"),
+        ("blowout_risk",                 "TEXT",    "'NONE'"),
+        ("blowout_adjustment_factor",    "DOUBLE",  "1.0"),
+        ("team_pace",                    "DOUBLE",  "100.0"),
+        ("opponent_pace",                "DOUBLE",  "100.0"),
+        ("expected_game_pace",           "DOUBLE",  "100.0"),
+        ("pace_adjustment_factor",       "DOUBLE",  "1.0"),
+        ("opponent_points_allowed",      "DOUBLE",  "110.0"),
+        ("opponent_rebounds_allowed",    "DOUBLE",  "44.0"),
+        ("opponent_assists_allowed",     "DOUBLE",  "25.0"),
+        ("defense_adj_pts",              "DOUBLE",  "1.0"),
+        ("defense_adj_reb",              "DOUBLE",  "1.0"),
+        ("defense_adj_ast",              "DOUBLE",  "1.0"),
+        ("usage_proxy",                  "DOUBLE",  "0.2"),
+        ("usage_trend_last_5",           "DOUBLE",  "0.0"),
+    ]
+    existing_cols = {
+        row[0] for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'player_features'"
+        ).fetchall()
+    }
+    for col_name, col_type, col_default in new_feature_cols:
+        if col_name not in existing_cols:
+            try:
+                conn.execute(f"ALTER TABLE player_features ADD COLUMN {col_name} {col_type} DEFAULT {col_default}")
+            except Exception:
+                pass  # column may already exist in some form
 
     logger.info("Model schema initialization complete.")
