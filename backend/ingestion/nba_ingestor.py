@@ -232,11 +232,29 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
     if limit:
         games_df = games_df.head(limit)
 
-    logger.info(f"Fetching box scores for {len(games_df)} games in {season}...")
+    total_games   = len(games_df)
     player_records = 0
-    team_records = 0
+    team_records   = 0
+    skipped        = 0
+    errors         = []
 
-    for _, row in games_df.iterrows():
+    if total_games == 0:
+        logger.info(f"  No new games to fetch for {season} — already up to date.")
+        if close:
+            conn.close()
+        return 0
+
+    secs_per_game = NBA_API_DELAY + 1.0   # conservative estimate incl. response time
+    eta_total_min = (total_games * secs_per_game) / 60
+    logger.info(
+        f"Fetching box scores for {total_games} games in {season}  "
+        f"(~{eta_total_min:.0f} min at {secs_per_game:.0f}s/game)"
+    )
+
+    t_start = time.time()
+    LOG_EVERY = 10   # print a progress line every N games
+
+    for i, (_, row) in enumerate(games_df.iterrows(), start=1):
         game_id = row["game_id"]
         try:
             _sleep()
@@ -246,7 +264,7 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
                 timeout=60
             )
             player_df = box.player_stats.get_data_frame()
-            team_df = box.team_stats.get_data_frame()
+            team_df   = box.team_stats.get_data_frame()
 
             for _, p in player_df.iterrows():
                 stat_id = f"{game_id}_{p['PLAYER_ID']}"
@@ -270,7 +288,6 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
 
             for _, t in team_df.iterrows():
                 stat_id = f"{game_id}_{t['TEAM_ID']}"
-                # Determine home/away
                 home_row = conn.execute(
                     "SELECT home_team_id FROM games WHERE game_id=?", [game_id]
                 ).fetchone()
@@ -295,7 +312,45 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
                 team_records += 1
 
         except Exception as e:
-            logger.warning(f"  Skipping box score for {game_id}: {e}")
+            skipped += 1
+            errors.append(game_id)
+            logger.warning(f"  [{i}/{total_games}] SKIP {game_id}: {e}")
+            continue
+
+        # ── Progress logging ──────────────────────────────────────────────
+        if i % LOG_EVERY == 0 or i == total_games:
+            elapsed      = time.time() - t_start
+            avg_per_game = elapsed / i
+            remaining    = total_games - i
+            eta_secs     = remaining * avg_per_game
+            pct          = i / total_games * 100
+
+            if eta_secs >= 3600:
+                eta_str = f"{eta_secs/3600:.1f}h"
+            elif eta_secs >= 60:
+                eta_str = f"{eta_secs/60:.0f}m"
+            else:
+                eta_str = f"{eta_secs:.0f}s"
+
+            elapsed_str = f"{elapsed/60:.1f}m" if elapsed >= 60 else f"{elapsed:.0f}s"
+
+            logger.info(
+                f"  [{i:>{len(str(total_games))}}/{total_games}]  "
+                f"{pct:5.1f}%  |  "
+                f"elapsed: {elapsed_str}  |  "
+                f"eta: {eta_str}  |  "
+                f"speed: {avg_per_game:.1f}s/game  |  "
+                f"skipped: {skipped}"
+            )
+
+    elapsed_total = time.time() - t_start
+    logger.info(
+        f"  ✓ Done — {i} games in {elapsed_total/60:.1f}m  |  "
+        f"{player_records} player rows  |  {team_records} team rows  |  {skipped} skipped"
+    )
+    if errors:
+        logger.warning(f"  Failed game IDs: {', '.join(errors[:20])}"
+                       + (" ..." if len(errors) > 20 else ""))
 
     _log_ingestion(conn, "nba_api", f"box_scores:{season}", player_records + team_records, "success")
     logger.info(f"  → {player_records} player stat rows, {team_records} team stat rows.")
