@@ -226,8 +226,11 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
         games_df = conn.execute("""
             SELECT game_id FROM games
             WHERE season = ? AND status = 'Final'
-            AND game_id NOT IN (SELECT DISTINCT game_id FROM player_game_stats)
-        """, [season]).df()
+            AND game_id NOT IN (
+                SELECT DISTINCT game_id FROM player_game_stats
+                WHERE season = ?
+            )
+        """, [season, season]).df()
 
     if limit:
         games_df = games_df.head(limit)
