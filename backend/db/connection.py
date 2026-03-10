@@ -292,6 +292,7 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("defense_adj_ast",              "DOUBLE",  "1.0"),
         ("usage_proxy",                  "DOUBLE",  "0.2"),
         ("usage_trend_last_5",           "DOUBLE",  "0.0"),
+        ("minutes_projection",           "DOUBLE",  "0.0"),
     ]
     existing_cols = {
         row[0] for row in conn.execute(
