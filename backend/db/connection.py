@@ -178,8 +178,9 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
+    conn.execute("DROP TABLE IF EXISTS player_features")
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS player_features (
+        CREATE TABLE player_features (
             game_id                     TEXT,
             player_id                   TEXT,
             -- Rolling stat averages
