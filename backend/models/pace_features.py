@@ -105,6 +105,8 @@ def build_pace_features(conn=None) -> pd.DataFrame:
             FROM player_game_stats pgs
             JOIN games g ON pgs.game_id = g.game_id
             WHERE pgs.pts IS NOT NULL
+            AND g.home_team_id IS NOT NULL
+            AND g.away_team_id IS NOT NULL
         """).df()
 
         if player_teams.empty:
@@ -114,10 +116,13 @@ def build_pace_features(conn=None) -> pd.DataFrame:
         for _, row in player_teams.iterrows():
             game_id    = row["game_id"]
             player_id  = str(row["player_id"])
-            team_id    = int(row["team_id"])
-            home_id    = int(row["home_team_id"])
-            away_id    = int(row["away_team_id"])
-            opp_id     = away_id if team_id == home_id else home_id
+            try:
+                team_id = int(row["team_id"])
+                home_id = int(row["home_team_id"])
+                away_id = int(row["away_team_id"])
+            except (ValueError, TypeError):
+                continue  # skip rows with null team ids
+            opp_id = away_id if team_id == home_id else home_id
 
             team_pace = pace_lookup.get((game_id, team_id), league_avg_pace)
             opp_pace  = pace_lookup.get((game_id, opp_id),  league_avg_pace)
