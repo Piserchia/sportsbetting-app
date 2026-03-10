@@ -13,7 +13,11 @@ load_dotenv(Path(__file__).parent.parent.parent / "config" / ".env")
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.getenv("DB_PATH", "data/sportsbetting.db")
+# Always resolve DB path relative to the project root (parent of backend/)
+# This prevents ghost DBs being created when scripts are run from subdirectories
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_DB_PATH_RAW  = os.getenv("DB_PATH", "data/sportsbetting.db")
+DB_PATH       = str(_PROJECT_ROOT / _DB_PATH_RAW) if not os.path.isabs(_DB_PATH_RAW) else _DB_PATH_RAW
 
 
 def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
