@@ -198,7 +198,7 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             minutes_trend               DOUBLE,
             games_started_last_5        INTEGER,
             minutes_projection          DOUBLE,
-            blowout_risk                TEXT,
+            blowout_risk                VARCHAR,
             blowout_adjustment_factor   DOUBLE,
             -- Pace context
             team_pace                   DOUBLE,
@@ -270,6 +270,54 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
     """)
 
     # ── Migrate existing player_features tables ────────────────────────────
+    # Drop and recreate if the schema has changed (blowout_risk type fix)
+    try:
+        col_type = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'player_features' AND column_name = 'blowout_risk'"
+        ).fetchone()
+        if col_type and col_type[0].upper() not in ("VARCHAR", "TEXT"):
+            conn.execute("DROP TABLE IF EXISTS player_features")
+            logger.info("  Dropped player_features for schema migration (blowout_risk type fix).")
+    except Exception:
+        pass
+    # Re-run CREATE TABLE after potential drop
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_features (
+            game_id                     TEXT,
+            player_id                   TEXT,
+            points_avg_last_5           DOUBLE,
+            points_avg_last_10          DOUBLE,
+            rebounds_avg_last_5         DOUBLE,
+            rebounds_avg_last_10        DOUBLE,
+            assists_avg_last_5          DOUBLE,
+            assists_avg_last_10         DOUBLE,
+            season_avg_points           DOUBLE,
+            season_avg_rebounds         DOUBLE,
+            season_avg_assists          DOUBLE,
+            minutes_avg_last_5          DOUBLE,
+            minutes_avg_last_10         DOUBLE,
+            minutes_trend               DOUBLE,
+            games_started_last_5        INTEGER,
+            minutes_projection          DOUBLE,
+            blowout_risk                VARCHAR,
+            blowout_adjustment_factor   DOUBLE,
+            team_pace                   DOUBLE,
+            opponent_pace               DOUBLE,
+            expected_game_pace          DOUBLE,
+            pace_adjustment_factor      DOUBLE,
+            opponent_points_allowed     DOUBLE,
+            opponent_rebounds_allowed   DOUBLE,
+            opponent_assists_allowed    DOUBLE,
+            defense_adj_pts             DOUBLE,
+            defense_adj_reb             DOUBLE,
+            defense_adj_ast             DOUBLE,
+            usage_proxy                 DOUBLE,
+            usage_trend_last_5          DOUBLE,
+            PRIMARY KEY (game_id, player_id)
+        )
+    """)
+
     # Add new columns to existing tables without dropping them
     new_feature_cols = [
         ("rebounds_avg_last_5",         "DOUBLE",  "0.0"),
@@ -278,7 +326,7 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("season_avg_assists",           "DOUBLE",  "0.0"),
         ("minutes_avg_last_5",           "DOUBLE",  "0.0"),
         ("games_started_last_5",         "INTEGER", "0"),
-        ("blowout_risk",                 "TEXT",    "'NONE'"),
+        ("blowout_risk",                 "VARCHAR", "'NONE'"),
         ("blowout_adjustment_factor",    "DOUBLE",  "1.0"),
         ("team_pace",                    "DOUBLE",  "100.0"),
         ("opponent_pace",                "DOUBLE",  "100.0"),
