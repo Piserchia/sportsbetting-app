@@ -55,7 +55,7 @@ def _build_covariance_matrix(player_logs: pd.DataFrame) -> np.ndarray:
         std_ast = max(float(stats["assists"].std())  if len(stats) > 1 else 2.0, MIN_STD)
         return np.diag([std_pts**2, std_reb**2, std_ast**2])
 
-    cov = stats.cov().values
+    cov = stats.cov().values.copy()
     # Enforce minimum variances on the diagonal
     for i, min_var in enumerate([MIN_STD**2, MIN_STD**2, MIN_STD**2]):
         cov[i, i] = max(cov[i, i], min_var)
@@ -63,7 +63,7 @@ def _build_covariance_matrix(player_logs: pd.DataFrame) -> np.ndarray:
     # Ensure positive semi-definite via eigenvalue clipping
     eigvals, eigvecs = np.linalg.eigh(cov)
     eigvals = np.clip(eigvals, 1e-6, None)
-    cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
+    cov = (eigvecs @ np.diag(eigvals) @ eigvecs.T).copy()
 
     return cov
 
