@@ -236,6 +236,7 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
         games_df = games_df.head(limit)
 
     total_games   = len(games_df)
+    logger.info(f"  Games selected to fetch: {games_df['game_id'].tolist()[:10]} ...")  # show first 10
     player_records = 0
     team_records   = 0
     skipped        = 0
@@ -259,15 +260,24 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
 
     for i, (_, row) in enumerate(games_df.iterrows(), start=1):
         game_id = row["game_id"]
+        logger.info(f"  [{i}/{total_games}] Fetching game {game_id}...")
         try:
             _sleep()
+            logger.info(f"  [{i}] Calling BoxScoreTraditionalV2...")
             box = _fetch_with_retry(
                 boxscoretraditionalv2.BoxScoreTraditionalV2,
                 game_id=game_id,
                 timeout=60
             )
+            logger.info(f"  [{i}] API call returned — parsing DataFrames...")
             player_df = box.player_stats.get_data_frame()
             team_df   = box.team_stats.get_data_frame()
+            logger.info(f"  [{i}] game {game_id}: {len(player_df)} player rows, {len(team_df)} team rows from API")
+
+            if player_df.empty:
+                logger.warning(f"  [{i}] player_df is EMPTY for game {game_id} — skipping inserts")
+            if team_df.empty:
+                logger.warning(f"  [{i}] team_df is EMPTY for game {game_id} — skipping inserts")
 
             for _, p in player_df.iterrows():
                 stat_id = f"{game_id}_{p['PLAYER_ID']}"
