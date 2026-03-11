@@ -152,21 +152,23 @@ const BarTooltip = ({ active, payload, label }) => {
 
 // ── Player Search ──────────────────────────────────────────────────────────
 function PlayerSearch({ onSelect }) {
-  const [query, setQuery]   = useState("");
+  const [query, setQuery]     = useState("");
   const [results, setResults] = useState([]);
-  const [open, setOpen]     = useState(false);
+  const [focused, setFocused] = useState(false);
 
   useEffect(() => {
     if (query.length < 2) { setResults([]); return; }
     const t = setTimeout(async () => {
       try {
         const r = await fetch(`${API}/players?q=${encodeURIComponent(query)}&limit=10`);
-        setResults(await r.json());
-        setOpen(true);
+        const data = await r.json();
+        setResults(data);
       } catch { setResults([]); }
     }, 250);
     return () => clearTimeout(t);
   }, [query]);
+
+  const showDropdown = focused && results.length > 0;
 
   return (
     <div style={{ position: "relative", width: 280 }}>
@@ -175,18 +177,18 @@ function PlayerSearch({ onSelect }) {
           value={query}
           onChange={e => setQuery(e.target.value)}
           placeholder="Search player..."
+          onFocus={() => setFocused(true)}
+          onBlur={() => setTimeout(() => setFocused(false), 200)}
           style={{
             width: "100%", background: T.surface,
-            border: `1.5px solid ${T.border}`, borderRadius: 8,
+            border: `1.5px solid ${focused ? T.accent : T.border}`, borderRadius: 8,
             padding: "9px 14px 9px 36px", color: T.text,
             fontSize: 13, outline: "none", transition: "border-color 0.15s",
           }}
-          onFocus={e => { e.target.style.borderColor = T.accent; results.length && setOpen(true); }}
-          onBlur={e => { e.target.style.borderColor = T.border; setTimeout(() => setOpen(false), 150); }}
         />
         <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textFaint, fontSize: 14 }}>🔍</span>
       </div>
-      {open && results.length > 0 && (
+      {showDropdown && (
         <div style={{
           position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 100,
           background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8,
@@ -194,12 +196,11 @@ function PlayerSearch({ onSelect }) {
         }}>
           {results.map(p => (
             <div key={p.player_id}
-              onMouseDown={() => { onSelect(p); setQuery(p.full_name); setOpen(false); }}
+              onMouseDown={() => { onSelect(p); setQuery(p.full_name); setFocused(false); setResults([]); }}
               style={{
                 padding: "9px 14px", cursor: "pointer", fontSize: 13,
                 borderBottom: `1px solid ${T.gridLine}`,
                 display: "flex", justifyContent: "space-between", alignItems: "center",
-                transition: "background 0.1s",
               }}
               onMouseEnter={e => e.currentTarget.style.background = T.accentBg}
               onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
