@@ -16,7 +16,7 @@ from nba_api.stats.static import teams as nba_teams_static
 from nba_api.stats.static import players as nba_players_static
 from nba_api.stats.endpoints import (
     leaguegamelog,
-    boxscoretraditionalv2,
+    boxscoretraditionalv3,
     teamgamelog,
 )
 
@@ -263,24 +263,17 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
         logger.info(f"  [{i}/{total_games}] Fetching game {game_id}...")
         try:
             _sleep()
-            logger.info(f"  [{i}] Calling BoxScoreTraditionalV2...")
             box = _fetch_with_retry(
-                boxscoretraditionalv2.BoxScoreTraditionalV2,
+                boxscoretraditionalv3.BoxScoreTraditionalV3,
                 game_id=game_id,
                 timeout=60
             )
-            logger.info(f"  [{i}] API call returned — parsing DataFrames...")
-            player_df = box.player_stats.get_data_frame()
-            team_df   = box.team_stats.get_data_frame()
-            logger.info(f"  [{i}] game {game_id}: {len(player_df)} player rows, {len(team_df)} team rows from API")
-
-            if player_df.empty:
-                logger.warning(f"  [{i}] player_df is EMPTY for game {game_id} — skipping inserts")
-            if team_df.empty:
-                logger.warning(f"  [{i}] team_df is EMPTY for game {game_id} — skipping inserts")
+            player_df = box.data_sets[0].get_data_frame()  # Dataset 0 = player rows
+            team_df   = box.data_sets[2].get_data_frame()  # Dataset 2 = team totals
+            logger.info(f"  [{i}] game {game_id}: {len(player_df)} player rows, {len(team_df)} team rows")
 
             for _, p in player_df.iterrows():
-                stat_id = f"{game_id}_{p['PLAYER_ID']}"
+                stat_id = f"{game_id}_{p['personId']}"
                 conn.execute("""
                     INSERT OR REPLACE INTO player_game_stats
                         (stat_id, game_id, player_id, team_id, season,
@@ -289,22 +282,27 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
                          ftm, fta, ft_pct, plus_minus, updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
                 """, [
-                    stat_id, game_id, int(p["PLAYER_ID"]), int(p["TEAM_ID"]), season,
-                    p.get("MIN"), _safe_int(p, "PTS"), _safe_int(p, "REB"),
-                    _safe_int(p, "AST"), _safe_int(p, "STL"), _safe_int(p, "BLK"),
-                    _safe_int(p, "TO"), _safe_int(p, "FGM"), _safe_int(p, "FGA"),
-                    _safe_float(p, "FG_PCT"), _safe_int(p, "FG3M"), _safe_int(p, "FG3A"),
-                    _safe_float(p, "FG3_PCT"), _safe_int(p, "FTM"), _safe_int(p, "FTA"),
-                    _safe_float(p, "FT_PCT"), _safe_int(p, "PLUS_MINUS")
+                    stat_id, game_id, int(p["personId"]), int(p["teamId"]), season,
+                    str(p.get("minutes", "0:00")),
+                    _safe_int(p, "points"), _safe_int(p, "reboundsTotal"),
+                    _safe_int(p, "assists"), _safe_int(p, "steals"),
+                    _safe_int(p, "blocks"), _safe_int(p, "turnovers"),
+                    _safe_int(p, "fieldGoalsMade"), _safe_int(p, "fieldGoalsAttempted"),
+                    _safe_float(p, "fieldGoalsPercentage"),
+                    _safe_int(p, "threePointersMade"), _safe_int(p, "threePointersAttempted"),
+                    _safe_float(p, "threePointersPercentage"),
+                    _safe_int(p, "freeThrowsMade"), _safe_int(p, "freeThrowsAttempted"),
+                    _safe_float(p, "freeThrowsPercentage"),
+                    _safe_float(p, "plusMinusPoints"),
                 ])
                 player_records += 1
 
             for _, t in team_df.iterrows():
-                stat_id = f"{game_id}_{t['TEAM_ID']}"
+                stat_id = f"{game_id}_{t['teamId']}"
                 home_row = conn.execute(
                     "SELECT home_team_id FROM games WHERE game_id=?", [game_id]
                 ).fetchone()
-                is_home = home_row and int(t["TEAM_ID"]) == home_row[0]
+                is_home = home_row and int(t["teamId"]) == home_row[0]
 
                 conn.execute("""
                     INSERT OR REPLACE INTO team_game_stats
@@ -314,13 +312,18 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
                          ftm, fta, ft_pct, plus_minus, updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)
                 """, [
-                    stat_id, game_id, int(t["TEAM_ID"]), season, is_home,
-                    t.get("MIN"), _safe_int(t, "PTS"), _safe_int(t, "REB"),
-                    _safe_int(t, "AST"), _safe_int(t, "STL"), _safe_int(t, "BLK"),
-                    _safe_int(t, "TO"), _safe_int(t, "FGM"), _safe_int(t, "FGA"),
-                    _safe_float(t, "FG_PCT"), _safe_int(t, "FG3M"), _safe_int(t, "FG3A"),
-                    _safe_float(t, "FG3_PCT"), _safe_int(t, "FTM"), _safe_int(t, "FTA"),
-                    _safe_float(t, "FT_PCT"), _safe_int(t, "PLUS_MINUS")
+                    stat_id, game_id, int(t["teamId"]), season, is_home,
+                    str(t.get("minutes", "240:00")),
+                    _safe_int(t, "points"), _safe_int(t, "reboundsTotal"),
+                    _safe_int(t, "assists"), _safe_int(t, "steals"),
+                    _safe_int(t, "blocks"), _safe_int(t, "turnovers"),
+                    _safe_int(t, "fieldGoalsMade"), _safe_int(t, "fieldGoalsAttempted"),
+                    _safe_float(t, "fieldGoalsPercentage"),
+                    _safe_int(t, "threePointersMade"), _safe_int(t, "threePointersAttempted"),
+                    _safe_float(t, "threePointersPercentage"),
+                    _safe_int(t, "freeThrowsMade"), _safe_int(t, "freeThrowsAttempted"),
+                    _safe_float(t, "freeThrowsPercentage"),
+                    _safe_float(t, "plusMinusPoints"),
                 ])
                 team_records += 1
 
