@@ -168,7 +168,7 @@ function PlayerSearch({ onSelect }) {
     return () => clearTimeout(t);
   }, [query]);
 
-  const showDropdown = focused && results.length > 0;
+  const showDropdown = results.length > 0;
 
   return (
     <div style={{ position: "relative", width: 280 }}>
@@ -178,7 +178,7 @@ function PlayerSearch({ onSelect }) {
           onChange={e => setQuery(e.target.value)}
           placeholder="Search player..."
           onFocus={() => setFocused(true)}
-          onBlur={() => setTimeout(() => setFocused(false), 200)}
+          onBlur={() => setTimeout(() => setResults([]), 200)}
           style={{
             width: "100%", background: T.surface,
             border: `1.5px solid ${focused ? T.accent : T.border}`, borderRadius: 8,
