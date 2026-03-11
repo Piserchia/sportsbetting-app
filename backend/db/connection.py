@@ -182,9 +182,8 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         )
     """)
 
-    conn.execute("DROP TABLE IF EXISTS player_features")
     conn.execute("""
-        CREATE TABLE player_features (
+        CREATE TABLE IF NOT EXISTS player_features (
             game_id                     TEXT,
             player_id                   TEXT,
             -- Rolling stat averages
@@ -348,8 +347,8 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("minutes_projection",           "DOUBLE",  "0.0"),
     ]
     existing_cols = {
-        row[0] for row in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'player_features'"
+        row[0]: row[1] for row in conn.execute(
+            "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'player_features'"
         ).fetchall()
     }
     for col_name, col_type, col_default in new_feature_cols:
@@ -358,5 +357,13 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
                 conn.execute(f"ALTER TABLE player_features ADD COLUMN {col_name} {col_type} DEFAULT {col_default}")
             except Exception:
                 pass  # column may already exist in some form
+
+    # Fix blowout_risk if it was created as DOUBLE instead of VARCHAR
+    if existing_cols.get("blowout_risk", "").upper() in ("DOUBLE", "FLOAT", "REAL"):
+        try:
+            conn.execute("ALTER TABLE player_features DROP COLUMN blowout_risk")
+            conn.execute("ALTER TABLE player_features ADD COLUMN blowout_risk VARCHAR DEFAULT 'NONE'")
+        except Exception:
+            pass
 
     logger.info("Model schema initialization complete.")

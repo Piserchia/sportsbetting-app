@@ -37,8 +37,6 @@ def build_player_features(conn=None) -> int:
     """
     close = conn is None
     conn = conn or get_connection()
-    init_model_schema(conn)
-
     # ── 1. Base game logs ────────────────────────────────────────────────────
     logger.info("Loading player_game_logs...")
     logs = conn.execute("""
