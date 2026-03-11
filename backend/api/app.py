@@ -253,9 +253,8 @@ def player_game_log(player_id: int, limit: int = 10):
                 FROM player_game_logs pgl
                 JOIN games g ON pgl.game_id = g.game_id
                 WHERE pgl.player_id = CAST(? AS TEXT)
-                AND g.season = ?
                 ORDER BY pgl.game_date DESC LIMIT ?
-            """, [player_id, CURRENT_SEASON, limit]).fetchall()
+            """, [player_id, limit]).fetchall()
 
             result = []
             for r in rows:
@@ -295,10 +294,9 @@ def player_game_log(player_id: int, limit: int = 10):
             JOIN games g  ON pgs.game_id  = g.game_id
             JOIN teams t  ON pgs.team_id  = t.team_id
             WHERE pgs.player_id = ?
-            AND g.season = ?
             ORDER BY g.game_date DESC
             LIMIT ?
-        """, [player_id, CURRENT_SEASON, limit]).fetchall()
+        """, [player_id, limit]).fetchall()
 
         result = []
         for r in rows:
