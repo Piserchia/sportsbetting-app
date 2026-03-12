@@ -12,8 +12,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection, init_model_schema
-from backend.ingestion.game_log_sync import sync_game_logs
+from backend.database.connection import get_connection, init_model_schema
+from backend.data_sources.nba.game_log_sync import sync_game_logs
 from backend.models.feature_builder import build_player_features
 
 setup_logging()

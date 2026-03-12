@@ -13,8 +13,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection, init_schema
-from backend.ingestion.odds_ingestor import ingest_odds
+from backend.database.connection import get_connection, init_schema
+from backend.data_sources.sportsbooks.odds_ingestor import ingest_odds
 
 setup_logging()
 

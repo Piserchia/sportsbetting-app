@@ -1,0 +1,90 @@
+# Feature Schema Contract
+# Table: player_features
+# Built by: backend/models/feature_builder.py
+# Primary key: (game_id, player_id)
+
+feature_groups:
+  rolling_stats:
+    source: backend/features/rolling_stats.py
+    columns:
+      - points_avg_last_5
+      - points_avg_last_10
+      - rebounds_avg_last_5
+      - rebounds_avg_last_10
+      - assists_avg_last_5
+      - assists_avg_last_10
+      - season_avg_points
+      - season_avg_rebounds
+      - season_avg_assists
+      - steals_avg_last_5
+      - steals_avg_last_10
+      - blocks_avg_last_5
+      - blocks_avg_last_10
+      - season_avg_steals
+      - season_avg_blocks
+
+  minutes_model:
+    source: backend/models/minutes_model/
+    columns:
+      - minutes_avg_last_5
+      - minutes_avg_last_10
+      - minutes_trend
+      - games_started_last_5
+      - minutes_projection
+      - blowout_risk          # VARCHAR: NONE, LOW, MEDIUM, HIGH
+      - blowout_adjustment_factor
+
+  pace:
+    source: backend/models/pace_features.py
+    columns:
+      - team_pace
+      - opponent_pace
+      - expected_game_pace
+      - pace_adjustment_factor
+
+  defense:
+    source: backend/models/defense_features.py
+    columns:
+      - opponent_points_allowed
+      - opponent_rebounds_allowed
+      - opponent_assists_allowed
+      - defense_adj_pts
+      - defense_adj_reb
+      - defense_adj_ast
+      - opponent_steals_allowed
+      - opponent_blocks_allowed
+      - defense_adj_stl
+      - defense_adj_blk
+
+  positional_defense:
+    source: backend/models/positional_defense_features.py
+    columns:
+      - positional_defense_adj_pts
+      - positional_defense_adj_reb
+      - positional_defense_adj_ast
+      - defense_vs_pg
+      - defense_vs_sg
+      - defense_vs_sf
+      - defense_vs_pf
+      - defense_vs_c
+      - player_position
+
+  advanced_defense:
+    source: backend/models/advanced_defense_features.py
+    columns:
+      - team_off_rating
+      - opponent_def_rating
+      - rating_matchup_factor
+
+  usage:
+    source: backend/models/usage_features.py
+    columns:
+      - usage_proxy
+      - usage_trend_last_5
+
+  lineup:
+    source: backend/models/lineup_features.py
+    columns:
+      - usage_delta_teammate_out
+      - assist_delta_teammate_out
+      - rebound_delta_teammate_out

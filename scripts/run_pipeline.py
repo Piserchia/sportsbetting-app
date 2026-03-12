@@ -19,20 +19,29 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection, init_schema
-from backend.ingestion.nba_ingestor import (
-    ingest_teams, ingest_players, ingest_games, ingest_schedule, ingest_box_scores
-)
-from backend.ingestion.odds_ingestor import ingest_odds
-from backend.ingestion.props_ingestor import ingest_props
-from backend.ingestion.game_log_sync import sync_game_logs
-from backend.ingestion.injury_lineup_ingestor import ingest_injuries_and_lineups
-from backend.models.feature_builder import build_player_features
-from backend.models.projection_model import generate_projections
-from backend.models.simulation_engine import simulate_player_props
+from backend.database.connection import get_connection, init_schema, init_model_schema
+from backend.data_sources.sportsbooks.odds_ingestor import ingest_odds
+from backend.data_sources.sportsbooks.props_ingestor import ingest_props
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from calculate_edges import calculate_edges
+from backend.pipeline.stages import (
+    stage_01_ingestion,
+    stage_02_game_logs,
+    stage_03_features,
+    stage_04_projections,
+    stage_05_distributions,
+    stage_06_simulations,
+    stage_07_edges,
+)
+
+PIPELINE = [
+    stage_01_ingestion,
+    stage_02_game_logs,
+    stage_03_features,
+    stage_04_projections,
+    stage_05_distributions,
+    stage_06_simulations,
+    stage_07_edges,
+]
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -47,27 +56,26 @@ def run_pipeline(skip_box_scores: bool = False, full_rebuild: bool = False):
     init_schema(conn)
 
     try:
-        ingest_teams(conn=conn)
-        ingest_players(conn=conn)
-        ingest_games(conn=conn)
-        ingest_schedule(conn=conn)
+        # Stage 1: Ingestion
+        stage_01_ingestion.run(conn, skip_box_scores=skip_box_scores)
 
-        if not skip_box_scores:
-            seasons = os.getenv("NBA_SEASONS", "2024-25").split(",")
-            for season in seasons:
-                ingest_box_scores(season.strip(), conn=conn)
+        # Stage 2: Game log sync
+        stage_02_game_logs.run(conn)
 
-        ingest_odds(conn=conn)
-        ingest_props(conn=conn)
-        ingest_injuries_and_lineups(conn=conn)
+        # Stage 3: Feature engineering
+        stage_03_features.run(conn, incremental=not full_rebuild)
 
-        # Model pipeline
-        logger.info("Running model pipeline...")
-        sync_game_logs(conn=conn)
-        build_player_features(conn=conn, incremental=not full_rebuild)
-        generate_projections(conn=conn)
-        simulate_player_props(conn=conn)
-        calculate_edges(conn=conn)
+        # Stage 4: Projections
+        stage_04_projections.run(conn)
+
+        # Stage 5: Distributions
+        stage_05_distributions.run(conn)
+
+        # Stage 6: Simulations
+        stage_06_simulations.run(conn)
+
+        # Stage 7: Edge detection
+        stage_07_edges.run(conn)
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}")
@@ -106,7 +114,6 @@ if __name__ == "__main__":
 
         # Props fetch at fixed daily times (free-tier optimized)
         def props_only():
-            from backend.db.connection import init_model_schema
             conn = get_connection()
             init_schema(conn)
             init_model_schema(conn)

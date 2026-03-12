@@ -12,8 +12,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection
-from backend.models.simulation_engine import simulate_player_props
+from backend.database.connection import get_connection
+from backend.pipeline.simulations.simulation_engine import simulate_player_props
 
 setup_logging()
 

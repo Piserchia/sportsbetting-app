@@ -19,8 +19,8 @@ import uuid
 import logging
 import pandas as pd
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection, init_model_schema
-from backend.models.simulation_engine import (
+from backend.database.connection import get_connection, init_model_schema
+from backend.pipeline.simulations.simulation_engine import (
     probability_to_american_odds,
     american_odds_to_probability,
 )

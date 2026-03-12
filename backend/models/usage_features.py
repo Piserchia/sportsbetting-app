@@ -15,7 +15,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from backend.db.connection import get_connection
+from backend.database.connection import get_connection
 
 logger = logging.getLogger(__name__)
 

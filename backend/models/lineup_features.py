@@ -20,7 +20,7 @@ import logging
 import pandas as pd
 import numpy as np
 
-from backend.db.connection import get_connection, init_model_schema
+from backend.database.connection import get_connection, init_model_schema
 
 logger = logging.getLogger(__name__)
 

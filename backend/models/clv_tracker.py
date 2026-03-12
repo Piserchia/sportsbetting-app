@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from backend.db.connection import get_connection, init_model_schema
+from backend.database.connection import get_connection, init_model_schema
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,42 @@
+# Projection Schema Contract
+# Built by: backend/models/stat_models/projection_model.py
+
+projections:
+  table: player_projections
+  primary_key: [game_id, player_id]
+  columns:
+    - points_mean
+    - rebounds_mean
+    - assists_mean
+    - steals_mean
+    - blocks_mean
+    - minutes_projection
+
+distributions:
+  table: player_distributions
+  primary_key: [game_id, player_id, stat]
+  columns:
+    - mean
+    - std_dev
+  stats: [points, rebounds, assists, steals, blocks]
+
+  distribution_types:
+    points: Gamma
+    rebounds: NegativeBinomial
+    assists: NegativeBinomial
+    steals: NegativeBinomial
+    blocks: NegativeBinomial
+    fallback: Normal
+
+simulations:
+  table: player_simulations
+  primary_key: [game_id, player_id, stat, line]
+  n_samples: 10000
+  min_std_dev: 1.5
+
+  prop_lines:
+    points: [9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5, 23.5, 24.5, 25.5, 26.5, 27.5, 28.5, 29.5, 30.5, 31.5, 32.5, 34.5, 39.5, 44.5]
+    rebounds: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 14.5]
+    assists: [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5]
+    steals: [0.5, 1.5, 2.5, 3.5]
+    blocks: [0.5, 1.5, 2.5, 3.5]

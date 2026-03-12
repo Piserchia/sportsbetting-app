@@ -20,7 +20,7 @@ import logging
 import pandas as pd
 import numpy as np
 
-from backend.db.connection import get_connection, init_model_schema
+from backend.database.connection import get_connection, init_model_schema
 from backend.models.pace_features    import build_pace_features
 from backend.models.defense_features import build_defense_features
 from backend.models.minutes_model    import build_minutes_features
@@ -28,7 +28,7 @@ from backend.models.usage_features   import build_usage_features
 from backend.models.positional_defense_features import build_positional_defense_features
 from backend.models.advanced_defense_features import build_advanced_defense_features
 from backend.models.lineup_features import build_lineup_features
-from backend.ingestion.injury_lineup_ingestor import get_teammate_injury_multipliers
+from backend.data_sources.injuries.injury_lineup_ingestor import get_teammate_injury_multipliers
 
 logger = logging.getLogger(__name__)
 

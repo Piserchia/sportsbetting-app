@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.db.connection import get_connection
+from backend.database.connection import get_connection
 from backend.models.edges_query import get_best_edges
 
 logger = logging.getLogger(__name__)
@@ -949,5 +949,44 @@ def edges_best(limit: int = 100, min_edge: float = 0.0):
             })
 
         return {"edges": edges}
+    finally:
+        conn.close()
+
+
+@app.get("/players/{player_id}/projection_explanation")
+def get_projection_explanation(player_id: int, stat: str = Query(default="points")):
+    """
+    Return SHAP feature contributions explaining why the model produced
+    a specific projection for a player/stat.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT feature, contribution
+            FROM projection_explanations
+            WHERE player_id = ?
+              AND stat = ?
+            ORDER BY ABS(contribution) DESC
+        """, [player_id, stat]).fetchall()
+
+        if not rows:
+            return {"player_id": player_id, "stat": stat, "contributions": [], "source": "no_data"}
+
+        contributions = [
+            {"feature": r[0], "contribution": round(r[1], 4)}
+            for r in rows
+        ]
+
+        positive = [c for c in contributions if c["contribution"] > 0][:5]
+        negative = [c for c in contributions if c["contribution"] < 0][:5]
+
+        return {
+            "player_id": player_id,
+            "stat": stat,
+            "contributions": contributions,
+            "top_positive": positive,
+            "top_negative": negative,
+            "source": "shap",
+        }
     finally:
         conn.close()

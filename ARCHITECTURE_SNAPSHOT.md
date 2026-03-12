@@ -14,7 +14,20 @@ sportsbetting-app/
 │   ├── analysis/
 │   │   ├── __init__.py
 │   │   └── queries.py
-│   ├── db/
+│   ├── contracts/
+│   │   ├── database_schema.yaml
+│   │   ├── feature_schema.yaml
+│   │   └── projection_schema.yaml
+│   ├── data_sources/
+│   │   ├── nba/
+│   │   │   ├── nba_ingestor.py
+│   │   │   └── game_log_sync.py
+│   │   ├── sportsbooks/
+│   │   │   ├── odds_ingestor.py
+│   │   │   └── props_ingestor.py
+│   │   └── injuries/
+│   │       └── injury_lineup_ingestor.py
+│   ├── database/
 │   │   ├── __init__.py
 │   │   ├── connection.py
 │   │   └── SCHEMA.md
@@ -26,13 +39,6 @@ sportsbetting-app/
 │   │   ├── pace_features.py
 │   │   ├── rolling_stats.py
 │   │   └── usage_features.py
-│   ├── ingestion/
-│   │   ├── __init__.py
-│   │   ├── game_log_sync.py
-│   │   ├── injury_lineup_ingestor.py
-│   │   ├── nba_ingestor.py
-│   │   ├── odds_ingestor.py
-│   │   └── props_ingestor.py
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── advanced_defense_features.py
@@ -40,16 +46,30 @@ sportsbetting-app/
 │   │   ├── defense_features.py
 │   │   ├── edges_query.py
 │   │   ├── feature_builder.py
-│   │   ├── game_simulator.py
 │   │   ├── lineup_features.py
-│   │   ├── minutes_model.py
-│   │   ├── minutes_model_trainer.py
 │   │   ├── pace_features.py
 │   │   ├── positional_defense_features.py
-│   │   ├── projection_model.py
-│   │   ├── simulation_engine.py
-│   │   ├── stat_models.py
-│   │   └── usage_features.py
+│   │   ├── usage_features.py
+│   │   ├── minutes_model/
+│   │   │   ├── minutes_model.py
+│   │   │   └── minutes_model_trainer.py
+│   │   └── stat_models/
+│   │       ├── stat_models.py
+│   │       └── projection_model.py
+│   ├── pipeline/
+│   │   ├── stages/
+│   │   │   ├── stage_01_ingestion.py
+│   │   │   ├── stage_02_game_logs.py
+│   │   │   ├── stage_03_features.py
+│   │   │   ├── stage_04_projections.py
+│   │   │   ├── stage_05_simulations.py
+│   │   │   ├── stage_06_edges.py
+│   │   │   └── stage_07_edges.py
+│   │   └── simulations/
+│   │       ├── simulation_engine.py
+│   │       └── game_simulator.py
+│   ├── ingestion/                       ← compat shim (re-exports from data_sources/)
+│   ├── db/                              ← compat shim (re-exports from database/)
 │   └── __init__.py
 ├── config/
 │   ├── .env
@@ -97,9 +117,9 @@ sportsbetting-app/
 
 ## 2. Module Responsibilities
 
-**backend/ingestion/**
+**backend/data_sources/**
 - Purpose: Fetch raw data from external APIs and normalize into DuckDB
-- Key files: `nba_ingestor.py`, `props_ingestor.py`, `odds_ingestor.py`, `game_log_sync.py`, `injury_lineup_ingestor.py`
+- Subdirectories: `nba/` (nba_ingestor, game_log_sync), `sportsbooks/` (props_ingestor, odds_ingestor), `injuries/` (injury_lineup_ingestor)
 - Dependencies: nba_api, SportsGameOdds API v2, The Odds API, DuckDB
 
 **backend/features/**
@@ -108,16 +128,27 @@ sportsbetting-app/
 - Dependencies: `player_game_logs`, `team_game_stats`, `games` tables
 
 **backend/models/**
-- Purpose: ML projections, Monte Carlo simulations, feature orchestration, edge aggregation, performance tracking
-- Key files: `feature_builder.py`, `projection_model.py`, `stat_models.py`, `simulation_engine.py`, `edges_query.py`, `clv_tracker.py`
+- Purpose: ML projections, feature orchestration, edge aggregation, performance tracking
+- Key files: `feature_builder.py`, `edges_query.py`, `clv_tracker.py`
+- Subdirectories: `minutes_model/` (minutes_model, trainer), `stat_models/` (stat_models, projection_model)
 - Dependencies: `player_features`, `player_game_logs`, `player_projections`, `player_distributions`, `prop_edges`
+
+**backend/pipeline/**
+- Purpose: Pipeline orchestration and simulation engine
+- Subdirectories: `stages/` (stage_01 through stage_07), `simulations/` (simulation_engine, game_simulator)
+- Dependencies: all backend modules
+
+**backend/contracts/**
+- Purpose: Schema contract definitions (YAML) for database tables, features, and projections
+- Key files: `database_schema.yaml`, `feature_schema.yaml`, `projection_schema.yaml`
+- Dependencies: none (definitional)
 
 **backend/api/**
 - Purpose: FastAPI REST server — bridges DuckDB to the React frontend (read-only queries)
 - Key files: `app.py`
-- Dependencies: all DB tables, `backend/models/edges_query.py`, `backend/db/connection.py`
+- Dependencies: all DB tables, `backend/models/edges_query.py`, `backend/database/connection.py`
 
-**backend/db/**
+**backend/database/**
 - Purpose: DuckDB connection management and schema initialization (21 tables)
 - Key files: `connection.py`, `SCHEMA.md`
 - Dependencies: none (foundational)
@@ -127,9 +158,15 @@ sportsbetting-app/
 - Key files: `queries.py`
 - Dependencies: DuckDB
 
+**backend/ingestion/** (compat shim)
+- Re-exports from `backend/data_sources/` for backward compatibility
+
+**backend/db/** (compat shim)
+- Re-exports from `backend/database/` for backward compatibility
+
 **scripts/**
 - Purpose: CLI entry points for each pipeline step + full orchestration
-- Key files: `run_pipeline.py` (orchestrator), `calculate_edges.py` (edge detection), `build_features.py`, `run_projections.py`, `simulate_props.py`
+- Key files: `run_pipeline.py` (orchestrator, calls stage modules), `calculate_edges.py`, `build_features.py`, `run_projections.py`, `simulate_props.py`
 - Dependencies: all backend modules
 
 **frontend/src/components/**
@@ -141,7 +178,7 @@ sportsbetting-app/
 
 ## 3. Pipeline Flow
 
-From `scripts/run_pipeline.py`:
+From `scripts/run_pipeline.py` (calls `backend/pipeline/stages/` modules):
 
 ```
 INGESTION PHASE
@@ -250,10 +287,10 @@ SportsGameOdds API                             │
 
 | API | Module | Auth | Rate Limit |
 |---|---|---|---|
-| nba_api (NBA stats) | `backend/ingestion/nba_ingestor.py` | None | 3s delay enforced |
-| SportsGameOdds v2 | `backend/ingestion/props_ingestor.py` | `SPORTSGAMEODDS_API_KEY` | 60-min cooldown, credit budget |
-| The Odds API | `backend/ingestion/odds_ingestor.py` | `ODDS_API_KEY` | Per-request billing |
-| ESPN / NBA.com | `backend/ingestion/injury_lineup_ingestor.py` | None | Scraped |
+| nba_api (NBA stats) | `backend/data_sources/nba/nba_ingestor.py` | None | 3s delay enforced |
+| SportsGameOdds v2 | `backend/data_sources/sportsbooks/props_ingestor.py` | `SPORTSGAMEODDS_API_KEY` | 60-min cooldown, credit budget |
+| The Odds API | `backend/data_sources/sportsbooks/odds_ingestor.py` | `ODDS_API_KEY` | Per-request billing |
+| ESPN / NBA.com | `backend/data_sources/injuries/injury_lineup_ingestor.py` | None | Scraped |
 
 ---
 
@@ -261,26 +298,31 @@ SportsGameOdds API                             │
 
 ```
 run_pipeline.py
-  ├── nba_ingestor       (teams, players, games, box scores)
-  ├── odds_ingestor      (game odds)
-  ├── props_ingestor     (player prop lines)
-  ├── injury_lineup_ingestor
-  ├── game_log_sync      → player_game_logs
-  ├── feature_builder
-  │     ├── minutes_model
-  │     ├── pace_features (models/)
-  │     ├── defense_features (models/)
-  │     ├── advanced_defense_features
-  │     ├── positional_defense_features
-  │     ├── usage_features (models/)
-  │     └── lineup_features (models/)
-  ├── projection_model
-  │     └── stat_models
-  ├── simulation_engine
-  └── calculate_edges.py
+  ├── backend/pipeline/stages/stage_01_ingestion
+  │     ├── data_sources/nba/nba_ingestor    (teams, players, games, box scores)
+  │     ├── data_sources/sportsbooks/odds_ingestor
+  │     ├── data_sources/sportsbooks/props_ingestor
+  │     └── data_sources/injuries/injury_lineup_ingestor
+  ├── backend/pipeline/stages/stage_02_game_logs
+  │     └── data_sources/nba/game_log_sync
+  ├── backend/pipeline/stages/stage_03_features
+  │     └── feature_builder
+  │           ├── models/minutes_model/minutes_model
+  │           ├── models/pace_features
+  │           ├── models/defense_features
+  │           ├── models/advanced_defense_features
+  │           ├── models/positional_defense_features
+  │           ├── models/usage_features
+  │           └── models/lineup_features
+  ├── backend/pipeline/stages/stage_04_projections
+  │     └── models/stat_models/projection_model
+  │           └── models/stat_models/stat_models
+  ├── backend/pipeline/stages/stage_05_simulations
+  │     └── pipeline/simulations/simulation_engine
+  └── backend/pipeline/stages/stage_06_edges + stage_07_edges
 
 app.py (FastAPI)
-  ├── db/connection.py
+  ├── database/connection.py
   └── models/edges_query.py
 ```
 
@@ -291,10 +333,10 @@ app.py (FastAPI)
 | File | Risk | Reason |
 |---|---|---|
 | `scripts/run_pipeline.py` | HIGH | Orchestrates entire pipeline; step order matters |
-| `backend/db/connection.py` | HIGH | Initializes all 21 table schemas; changes break everything downstream |
+| `backend/database/connection.py` | HIGH | Initializes all 21 table schemas; changes break everything downstream |
 | `backend/models/feature_builder.py` | HIGH | Orchestrates all 8 feature groups; wide output schema |
-| `backend/models/simulation_engine.py` | HIGH | PROP_LINES must stay half-point (.5) to match sportsbook lines; changes break edge join |
+| `backend/pipeline/simulations/simulation_engine.py` | HIGH | PROP_LINES must stay half-point (.5) to match sportsbook lines; changes break edge join |
 | `scripts/calculate_edges.py` | HIGH | game_id must come from `sportsbook_props` not `player_simulations`; exact line match required |
-| `backend/ingestion/props_ingestor.py` | MEDIUM | SGO API credit-limited; game matching logic fragile (team abbr map) |
-| `backend/models/projection_model.py` | MEDIUM | Uses last completed game_id as key; projections are for upcoming games via player history |
+| `backend/data_sources/sportsbooks/props_ingestor.py` | MEDIUM | SGO API credit-limited; game matching logic fragile (team abbr map) |
+| `backend/models/stat_models/projection_model.py` | MEDIUM | Uses last completed game_id as key; projections are for upcoming games via player history |
 | `backend/api/app.py` | MEDIUM | Single 900-line file; all endpoints; CORS config |

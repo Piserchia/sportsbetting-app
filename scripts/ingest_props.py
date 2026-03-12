@@ -17,8 +17,8 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection
-from backend.ingestion.props_ingestor import ingest_props, get_available_markets
+from backend.database.connection import get_connection
+from backend.data_sources.sportsbooks.props_ingestor import ingest_props, get_available_markets
 
 setup_logging()
 

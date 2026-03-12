@@ -12,8 +12,8 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection
-from backend.models.projection_model import generate_projections
+from backend.database.connection import get_connection
+from backend.models.stat_models.projection_model import generate_projections
 
 setup_logging()
 

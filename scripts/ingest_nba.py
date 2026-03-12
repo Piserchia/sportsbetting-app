@@ -15,8 +15,8 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection, init_schema
-from backend.ingestion.nba_ingestor import (
+from backend.database.connection import get_connection, init_schema
+from backend.data_sources.nba.nba_ingestor import (
     ingest_teams, ingest_players, ingest_games, ingest_box_scores
 )
 

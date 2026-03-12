@@ -21,8 +21,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection
-from backend.models.minutes_model_trainer import train, MODEL_PATH
+from backend.database.connection import get_connection
+from backend.models.minutes_model.minutes_model_trainer import train, MODEL_PATH
 
 setup_logging()
 logger = logging.getLogger(__name__)

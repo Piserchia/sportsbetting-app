@@ -1,0 +1,1 @@
+from backend.models.minutes_model.minutes_model import build_minutes_features

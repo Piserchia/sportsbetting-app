@@ -4,7 +4,7 @@
 
 1. Read [`AI_CONTEXT.md`](AI_CONTEXT.md) for system architecture
 2. Read the relevant module `CONTEXT.md` file
-3. Verify database columns in [`backend/db/SCHEMA.md`](backend/db/SCHEMA.md)
+3. Verify database columns in [`backend/database/SCHEMA.md`](backend/database/SCHEMA.md)
 4. **Never invent tables or fields** — only use what exists in the schema
 5. Update context documentation when architecture changes
 
@@ -27,14 +27,16 @@ API key is in `config/.env` as `SPORTSGAMEODDS_API_KEY`.
 
 | Change | Update |
 |--------|--------|
-| New ingestion source | `backend/ingestion/CONTEXT.md` |
+| New ingestion source | `backend/data_sources/` (relevant subdirectory) |
 | New feature group | `backend/features/CONTEXT.md` + `backend/models/CONTEXT.md` |
-| Table schema change | `backend/db/SCHEMA.md` |
+| Table schema change | `backend/database/SCHEMA.md` |
 | New/changed API endpoint | `backend/api/CONTEXT.md` |
 | Pipeline step added/reordered | `PIPELINE.md` |
+| Pipeline stage module change | `backend/pipeline/stages/` + `PIPELINE.md` |
 | New module or directory | `REPO_MAP.md` + `AI_CONTEXT.md` |
 | Simulation line changes | `backend/models/CONTEXT.md` (PROP_LINES) |
 | New frontend component | `frontend/CONTEXT.md` |
+| Schema contract change | `backend/contracts/` (relevant YAML file) |
 
 ## Context Documentation Style
 

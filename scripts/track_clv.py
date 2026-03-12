@@ -17,7 +17,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
-from backend.db.connection import get_connection
+from backend.database.connection import get_connection
 from backend.models.clv_tracker import evaluate_completed_games, get_performance_summary
 
 setup_logging()

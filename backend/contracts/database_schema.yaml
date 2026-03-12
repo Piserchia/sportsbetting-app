@@ -1,0 +1,292 @@
+# Database Schema Contract
+# Engine: DuckDB (embedded)
+# Canonical source: backend/database/connection.py
+
+tables:
+  teams:
+    primary_key: [team_id]
+    columns:
+      team_id: {type: INTEGER}
+      full_name: {type: VARCHAR}
+      abbreviation: {type: VARCHAR}
+      nickname: {type: VARCHAR}
+      city: {type: VARCHAR}
+      state: {type: VARCHAR}
+      conference: {type: VARCHAR}
+      division: {type: VARCHAR}
+      updated_at: {type: TIMESTAMP, default: current_timestamp}
+
+  players:
+    primary_key: [player_id]
+    columns:
+      player_id: {type: INTEGER}
+      full_name: {type: VARCHAR}
+      first_name: {type: VARCHAR}
+      last_name: {type: VARCHAR}
+      is_active: {type: BOOLEAN}
+      updated_at: {type: TIMESTAMP, default: current_timestamp}
+
+  games:
+    primary_key: [game_id]
+    columns:
+      game_id: {type: VARCHAR}
+      season: {type: VARCHAR}
+      game_date: {type: DATE}
+      home_team_id: {type: INTEGER}
+      away_team_id: {type: INTEGER}
+      home_team_abbr: {type: VARCHAR}
+      away_team_abbr: {type: VARCHAR}
+      home_score: {type: INTEGER}
+      away_score: {type: INTEGER}
+      status: {type: VARCHAR, notes: "Final, Live, Upcoming"}
+      updated_at: {type: TIMESTAMP, default: current_timestamp}
+
+  player_game_stats:
+    primary_key: [stat_id]
+    columns:
+      stat_id: {type: VARCHAR, notes: "game_id + player_id"}
+      game_id: {type: VARCHAR}
+      player_id: {type: INTEGER}
+      team_id: {type: INTEGER}
+      season: {type: VARCHAR}
+      min: {type: VARCHAR}
+      pts: {type: INTEGER}
+      reb: {type: INTEGER}
+      ast: {type: INTEGER}
+      stl: {type: INTEGER}
+      blk: {type: INTEGER}
+      tov: {type: INTEGER}
+      fgm: {type: INTEGER}
+      fga: {type: INTEGER}
+      fg_pct: {type: DOUBLE}
+      fg3m: {type: INTEGER}
+      fg3a: {type: INTEGER}
+      fg3_pct: {type: DOUBLE}
+      ftm: {type: INTEGER}
+      fta: {type: INTEGER}
+      ft_pct: {type: DOUBLE}
+      plus_minus: {type: INTEGER}
+      updated_at: {type: TIMESTAMP, default: current_timestamp}
+
+  team_game_stats:
+    primary_key: [stat_id]
+    columns:
+      stat_id: {type: VARCHAR, notes: "game_id + team_id"}
+      game_id: {type: VARCHAR}
+      team_id: {type: INTEGER}
+      season: {type: VARCHAR}
+      is_home: {type: BOOLEAN}
+      min: {type: VARCHAR}
+      pts: {type: INTEGER}
+      reb: {type: INTEGER}
+      ast: {type: INTEGER}
+      stl: {type: INTEGER}
+      blk: {type: INTEGER}
+      tov: {type: INTEGER}
+      fgm: {type: INTEGER}
+      fga: {type: INTEGER}
+      fg_pct: {type: DOUBLE}
+      fg3m: {type: INTEGER}
+      fg3a: {type: INTEGER}
+      fg3_pct: {type: DOUBLE}
+      ftm: {type: INTEGER}
+      fta: {type: INTEGER}
+      ft_pct: {type: DOUBLE}
+      plus_minus: {type: INTEGER}
+      updated_at: {type: TIMESTAMP, default: current_timestamp}
+
+  odds:
+    primary_key: [odds_id]
+    columns:
+      odds_id: {type: VARCHAR, notes: "game_id + bookmaker + market"}
+      game_id: {type: VARCHAR}
+      bookmaker: {type: VARCHAR}
+      market: {type: VARCHAR, notes: "h2h, spreads, totals"}
+      home_price: {type: DOUBLE}
+      away_price: {type: DOUBLE}
+      home_point: {type: DOUBLE}
+      away_point: {type: DOUBLE}
+      fetched_at: {type: TIMESTAMP, default: current_timestamp}
+
+  ingestion_log:
+    primary_key: [log_id]
+    columns:
+      log_id: {type: VARCHAR}
+      source: {type: VARCHAR}
+      entity: {type: VARCHAR}
+      records_written: {type: INTEGER}
+      status: {type: VARCHAR}
+      message: {type: VARCHAR}
+      ran_at: {type: TIMESTAMP, default: current_timestamp}
+
+  player_game_logs:
+    primary_key: [game_id, player_id]
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      game_date: {type: DATE}
+      team: {type: TEXT}
+      minutes: {type: DOUBLE}
+      points: {type: DOUBLE}
+      rebounds: {type: DOUBLE}
+      assists: {type: DOUBLE}
+      steals: {type: DOUBLE}
+      blocks: {type: DOUBLE}
+      turnovers: {type: DOUBLE}
+      fg_attempts: {type: DOUBLE}
+      three_attempts: {type: DOUBLE}
+      free_throw_attempts: {type: DOUBLE}
+
+  player_projections:
+    primary_key: [game_id, player_id]
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      points_mean: {type: DOUBLE}
+      rebounds_mean: {type: DOUBLE}
+      assists_mean: {type: DOUBLE}
+      steals_mean: {type: DOUBLE}
+      blocks_mean: {type: DOUBLE}
+      minutes_projection: {type: DOUBLE}
+
+  player_distributions:
+    primary_key: [game_id, player_id, stat]
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      stat: {type: TEXT}
+      mean: {type: DOUBLE}
+      std_dev: {type: DOUBLE}
+
+  player_simulations:
+    primary_key: [game_id, player_id, stat, line]
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      probability: {type: DOUBLE}
+
+  prop_edges:
+    primary_key: [game_id, player_id, stat, line, book]
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      sportsbook_odds: {type: DOUBLE}
+      model_probability: {type: DOUBLE}
+      fair_odds: {type: DOUBLE}
+      expected_value: {type: DOUBLE}
+      edge_percent: {type: DOUBLE}
+      book: {type: TEXT}
+
+  sportsbook_props:
+    primary_key: [prop_id]
+    columns:
+      prop_id: {type: TEXT}
+      fetched_at: {type: TIMESTAMP}
+      book: {type: TEXT}
+      player_id: {type: TEXT}
+      player_name: {type: TEXT}
+      game_id: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      over_odds: {type: DOUBLE}
+      under_odds: {type: DOUBLE}
+
+  prop_line_history:
+    primary_key: [history_id]
+    columns:
+      history_id: {type: TEXT}
+      fetched_at: {type: TIMESTAMP}
+      book: {type: TEXT}
+      player_id: {type: TEXT}
+      player_name: {type: TEXT}
+      game_id: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      over_odds: {type: DOUBLE}
+      under_odds: {type: DOUBLE}
+
+  player_injuries:
+    primary_key: [injury_id]
+    columns:
+      injury_id: {type: TEXT}
+      player_id: {type: TEXT}
+      player_name: {type: TEXT}
+      team_abbr: {type: TEXT}
+      status: {type: TEXT, notes: "Out, Doubtful, Questionable, Probable"}
+      injury_type: {type: TEXT}
+      report_date: {type: DATE}
+      game_id: {type: TEXT}
+      source: {type: TEXT}
+      fetched_at: {type: TIMESTAMP, default: current_timestamp}
+
+  starting_lineups:
+    primary_key: [lineup_id]
+    columns:
+      lineup_id: {type: TEXT}
+      game_id: {type: TEXT}
+      team_id: {type: INTEGER}
+      player_id: {type: TEXT}
+      is_starter: {type: BOOLEAN}
+      position: {type: TEXT}
+      report_date: {type: DATE}
+      source: {type: TEXT}
+      fetched_at: {type: TIMESTAMP, default: current_timestamp}
+
+  model_backtests:
+    primary_key: [backtest_id]
+    columns:
+      backtest_id: {type: TEXT}
+      run_date: {type: TEXT}
+      model_version: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      n_predictions: {type: INTEGER}
+      hit_rate: {type: DOUBLE}
+      brier_score: {type: DOUBLE}
+      log_loss: {type: DOUBLE}
+      roi: {type: DOUBLE}
+      avg_edge: {type: DOUBLE}
+      created_at: {type: TEXT}
+
+  team_advanced_stats:
+    primary_key: [game_id, team_id]
+    columns:
+      game_id: {type: TEXT}
+      team_id: {type: INTEGER}
+      off_rating: {type: DOUBLE}
+      def_rating: {type: DOUBLE}
+      pace: {type: DOUBLE}
+      possessions: {type: DOUBLE}
+
+  bet_results:
+    primary_key: [bet_id]
+    columns:
+      bet_id: {type: TEXT}
+      game_id: {type: TEXT}
+      player_id: {type: TEXT}
+      stat: {type: TEXT}
+      line: {type: DOUBLE}
+      direction: {type: TEXT}
+      odds_taken: {type: DOUBLE}
+      model_probability: {type: DOUBLE}
+      edge_at_entry: {type: DOUBLE}
+      actual_value: {type: DOUBLE}
+      hit: {type: BOOLEAN}
+      pnl: {type: DOUBLE}
+      closing_line: {type: DOUBLE}
+      clv: {type: DOUBLE}
+      placed_at: {type: TIMESTAMP}
+      settled_at: {type: TIMESTAMP}
+
+  projection_explanations:
+    primary_key: []
+    columns:
+      game_id: {type: TEXT}
+      player_id: {type: INTEGER}
+      stat: {type: TEXT, notes: "points, rebounds, assists, steals, blocks"}
+      feature: {type: TEXT, notes: "Feature name from STAT_FEATURES"}
+      contribution: {type: DOUBLE, notes: "SHAP value — positive means pushed projection up"}

@@ -3,6 +3,7 @@ import PipelineStatus from "./PipelineStatus";
 import EdgesDashboard from "./EdgesDashboard";
 import EdgesDashboard2 from "./EdgesDashboard2";
 import PipelineExplorer from "./PipelineExplorer";
+import ProjectionDebugger from "./ProjectionDebugger";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, AreaChart, Area, Cell,
@@ -234,6 +235,7 @@ export default function PropDashboard() {
   const [flags, setFlags]               = useState([]);
   const [loading, setLoading]           = useState(false);
   const [error, setError]               = useState(null);
+  const [showDebugger, setShowDebugger] = useState(false);
 
   const loadPlayer = useCallback(async (pid, stat) => {
     if (!pid) return;
@@ -436,6 +438,30 @@ export default function PropDashboard() {
                 );
               })()}
             </div>
+
+            {/* ── Explain button ── */}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+              <button
+                onClick={() => setShowDebugger(!showDebugger)}
+                style={{
+                  padding: "5px 14px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                  cursor: "pointer",
+                  border: showDebugger ? `1px solid ${T.accent}` : `1px solid ${T.border}`,
+                  background: showDebugger ? T.accentBg : "transparent",
+                  color: showDebugger ? T.accent : T.textSub,
+                }}
+              >
+                {showDebugger ? "Hide Explanation" : "Explain Projection"}
+              </button>
+            </div>
+
+            {showDebugger && (
+              <ProjectionDebugger
+                playerId={playerId}
+                stat={activeStat}
+                onClose={() => setShowDebugger(false)}
+              />
+            )}
 
             {/* ── Stat tabs ── */}
             <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>

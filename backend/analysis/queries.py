@@ -6,7 +6,7 @@ Returns pandas DataFrames for easy downstream use.
 
 import logging
 import pandas as pd
-from backend.db.connection import get_connection
+from backend.database.connection import get_connection
 
 logger = logging.getLogger(__name__)
 
