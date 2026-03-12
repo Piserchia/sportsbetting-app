@@ -66,7 +66,7 @@ def calculate_edges(conn=None) -> int:
 
     edges = conn.execute("""
         SELECT
-            s.game_id,
+            sp.game_id,
             s.player_id,
             s.stat,
             s.line,

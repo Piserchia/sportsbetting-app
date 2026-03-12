@@ -233,10 +233,67 @@ def _get_today_game_ids(conn) -> list:
     return game_ids
 
 
-def _match_game_id(conn, event_date: str, today_game_ids: list) -> Optional[str]:
-    """Match a game by date from today's game list."""
+# Map SGO teamID suffixes → our abbreviations
+# Format: DETROIT_PISTONS_NBA → try to match home_team_abbr / away_team_abbr
+_SGO_TEAM_ABBR: dict[str, str] = {
+    "ATLANTA_HAWKS_NBA":           "ATL",
+    "BOSTON_CELTICS_NBA":          "BOS",
+    "BROOKLYN_NETS_NBA":           "BKN",
+    "CHARLOTTE_HORNETS_NBA":       "CHA",
+    "CHICAGO_BULLS_NBA":           "CHI",
+    "CLEVELAND_CAVALIERS_NBA":     "CLE",
+    "DALLAS_MAVERICKS_NBA":        "DAL",
+    "DENVER_NUGGETS_NBA":          "DEN",
+    "DETROIT_PISTONS_NBA":         "DET",
+    "GOLDEN_STATE_WARRIORS_NBA":   "GSW",
+    "HOUSTON_ROCKETS_NBA":         "HOU",
+    "INDIANA_PACERS_NBA":          "IND",
+    "LOS_ANGELES_CLIPPERS_NBA":    "LAC",
+    "LOS_ANGELES_LAKERS_NBA":      "LAL",
+    "MEMPHIS_GRIZZLIES_NBA":       "MEM",
+    "MIAMI_HEAT_NBA":              "MIA",
+    "MILWAUKEE_BUCKS_NBA":         "MIL",
+    "MINNESOTA_TIMBERWOLVES_NBA":  "MIN",
+    "NEW_ORLEANS_PELICANS_NBA":    "NOP",
+    "NEW_YORK_KNICKS_NBA":         "NYK",
+    "OKLAHOMA_CITY_THUNDER_NBA":   "OKC",
+    "ORLANDO_MAGIC_NBA":           "ORL",
+    "PHILADELPHIA_76ERS_NBA":      "PHI",
+    "PHOENIX_SUNS_NBA":            "PHX",
+    "PORTLAND_TRAIL_BLAZERS_NBA":  "POR",
+    "SACRAMENTO_KINGS_NBA":        "SAC",
+    "SAN_ANTONIO_SPURS_NBA":       "SAS",
+    "TORONTO_RAPTORS_NBA":         "TOR",
+    "UTAH_JAZZ_NBA":               "UTA",
+    "WASHINGTON_WIZARDS_NBA":      "WAS",
+}
+
+
+def _match_game_id(conn, event_date: str, today_game_ids: list,
+                   home_team_id: str = "", away_team_id: str = "") -> Optional[str]:
+    """
+    Match an SGO event to our internal game_id.
+    Primary: match on team abbreviations (home + away).
+    Fallback: first game on event_date (for cases where team mapping fails).
+    """
     if not today_game_ids:
         return None
+
+    home_abbr = _SGO_TEAM_ABBR.get(home_team_id, "")
+    away_abbr = _SGO_TEAM_ABBR.get(away_team_id, "")
+
+    if home_abbr and away_abbr:
+        result = conn.execute("""
+            SELECT game_id FROM games
+            WHERE CAST(game_date AS VARCHAR) = ?
+              AND home_team_abbr = ?
+              AND away_team_abbr = ?
+            LIMIT 1
+        """, [event_date, home_abbr, away_abbr]).fetchone()
+        if result:
+            return result[0]
+
+    # Fallback: date-only match within today's games
     placeholders = ",".join(["?"] * len(today_game_ids))
     result = conn.execute(f"""
         SELECT game_id FROM games
@@ -317,12 +374,15 @@ def _parse_props_from_events(events: list, books: list, player_lookup: dict,
     records = []
 
     for event in events:
-        starts_at   = event.get("status", {}).get("startsAt", "")
-        event_date  = starts_at[:10] if starts_at else ""
-        odds_map    = event.get("odds", {})
-        players_map = event.get("players", {})
+        starts_at    = event.get("status", {}).get("startsAt", "")
+        event_date   = starts_at[:10] if starts_at else ""
+        odds_map     = event.get("odds", {})
+        players_map  = event.get("players", {})
+        teams        = event.get("teams", {})
+        home_team_id = teams.get("home", {}).get("teamID", "")
+        away_team_id = teams.get("away", {}).get("teamID", "")
 
-        game_id = _match_game_id(conn, event_date, today_game_ids)
+        game_id = _match_game_id(conn, event_date, today_game_ids, home_team_id, away_team_id)
         if not game_id:
             continue
 

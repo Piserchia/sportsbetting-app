@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.db.connection import get_connection
+from backend.models.edges_query import get_best_edges
 
 logger = logging.getLogger(__name__)
 
@@ -896,5 +897,57 @@ def matchup_flags(game_id: str, player_id: int = Query(...)):
                     })
 
         return {"game_id": game_id, "opponent": opponent, "flags": flags}
+    finally:
+        conn.close()
+
+
+@app.get("/edges/best")
+def edges_best(limit: int = 100, min_edge: float = 0.0):
+    """
+    Best sportsbook line per prop for today, deduplicated by book.
+    Ranked by bet_score = (edge_percent * 0.6) + (model_probability * 25).
+    """
+    conn = get_connection()
+    try:
+        df = get_best_edges(conn, limit=limit, min_edge=min_edge)
+
+        if df.empty:
+            return {"edges": []}
+
+        stat_mean_col = {
+            "points":   "points_mean",
+            "rebounds": "rebounds_mean",
+            "assists":  "assists_mean",
+            "steals":   "steals_mean",
+            "blocks":   "blocks_mean",
+        }
+
+        edges = []
+        for _, row in df.iterrows():
+            stat = row["stat"]
+            mean_col = stat_mean_col.get(stat)
+            projection = float(row[mean_col]) if mean_col and row[mean_col] is not None and not (isinstance(row[mean_col], float) and math.isnan(row[mean_col])) else None
+            line_diff = round(projection - float(row["line"]), 2) if projection is not None else None
+
+            matchup = f"{row['away_team_abbr']} @ {row['home_team_abbr']}"
+
+            edges.append({
+                "game_id":      row["game_id"],
+                "player_id":    row["player_id"],
+                "player":       row["player_name"],
+                "matchup":      matchup,
+                "stat":         stat,
+                "line":         float(row["line"]),
+                "projection":   projection,
+                "line_diff":    line_diff,
+                "probability":  round(float(row["model_probability"]), 4),
+                "fair_odds":    int(row["fair_odds"]) if row["fair_odds"] is not None else None,
+                "best_book":    row["book"],
+                "best_odds":    int(row["sportsbook_odds"]) if row["sportsbook_odds"] is not None else None,
+                "edge_percent": round(float(row["edge_percent"]), 2),
+                "score":        round(float(row["bet_score"]), 2),
+            })
+
+        return {"edges": edges}
     finally:
         conn.close()
