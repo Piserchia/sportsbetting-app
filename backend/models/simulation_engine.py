@@ -3,7 +3,7 @@ models/simulation_engine.py
 Monte Carlo simulation engine — v2 with improved statistical distributions.
 
 Distribution choices:
-    Points    → Log-normal  (right-skewed, never negative, realistic NBA scoring)
+    Points    → Gamma  (right-skewed, better tail behavior than log-normal)
     Rebounds  → Negative Binomial (count data, overdispersed)
     Assists   → Negative Binomial (count data, overdispersed)
 
@@ -50,31 +50,30 @@ MIN_STD = 1.5
 
 # ── Distribution parameter fitting ────────────────────────────────────────────
 
-class LogNormalParams(NamedTuple):
-    mu: float
-    sigma: float
+class GammaParams(NamedTuple):
+    k: float      # shape parameter
+    theta: float   # scale parameter
 
 class NegBinParams(NamedTuple):
     n: float      # number of successes (dispersion)
     p: float      # probability of success
 
 
-def _fit_lognormal(mean: float, std: float) -> LogNormalParams:
+def _fit_gamma(mean: float, std: float) -> GammaParams:
     """
-    Fit log-normal parameters from a target mean and std dev.
+    Fit Gamma distribution parameters from a target mean and std dev.
 
-    For X ~ LogNormal(mu, sigma):
-        E[X] = exp(mu + sigma^2/2)
-        Var[X] = (exp(sigma^2) - 1) * exp(2*mu + sigma^2)
+    For X ~ Gamma(k, θ):
+        E[X] = k * θ
+        Var[X] = k * θ²
+    => k = mean² / var,  θ = var / mean
     """
     mean = max(mean, 0.5)
     std  = max(std,  MIN_STD)
     var  = std ** 2
-    # sigma^2 = log(1 + var/mean^2)
-    sigma2 = np.log(1 + var / (mean ** 2))
-    sigma  = np.sqrt(sigma2)
-    mu     = np.log(mean) - sigma2 / 2
-    return LogNormalParams(mu=mu, sigma=sigma)
+    k     = (mean ** 2) / var
+    theta = var / mean
+    return GammaParams(k=k, theta=theta)
 
 
 def _fit_negbin(mean: float, std: float) -> NegBinParams:
@@ -101,16 +100,17 @@ def _fit_negbin(mean: float, std: float) -> NegBinParams:
     return NegBinParams(n=n, p=p)
 
 
-def _sim_lognormal(
+def _sim_gamma(
     rng: np.random.Generator,
     mean: float,
     std: float,
     size: int,
 ) -> np.ndarray:
-    """Draw `size` log-normal samples targeting given mean/std. Clipped to [0, inf)."""
+    """Draw `size` Gamma samples targeting given mean/std. Clipped to [0, inf)."""
     try:
-        p = _fit_lognormal(mean, std)
-        samples = rng.lognormal(p.mu, p.sigma, size)
+        p = _fit_gamma(mean, std)
+        samples = stats.gamma.rvs(a=p.k, scale=p.theta, size=size,
+                                  random_state=int(rng.integers(0, 2**31)))
         return np.clip(samples, 0.0, None)
     except Exception:
         # Fallback: normal
@@ -210,11 +210,11 @@ def _correlated_combo_sims(
         u = _gaussian_copula_sample(rng, corr_matrix, size)
 
         # Invert through each marginal's CDF to get correlated stat samples
-        # Points → log-normal PPF
-        pts_p = _fit_lognormal(mean_pts, std_pts)
-        sim_pts = stats.lognorm.ppf(
+        # Points → Gamma PPF
+        pts_p = _fit_gamma(mean_pts, std_pts)
+        sim_pts = stats.gamma.ppf(
             np.clip(u[:, 0], 1e-6, 1 - 1e-6),
-            s=pts_p.sigma, scale=np.exp(pts_p.mu)
+            a=pts_p.k, scale=pts_p.theta
         )
 
         # Rebounds → negative binomial PPF
@@ -269,7 +269,7 @@ def simulate_player_props(conn=None) -> int:
     Run Monte Carlo simulations for all players:
 
       Individual props:
-        - Points   via log-normal distribution
+        - Points   via Gamma distribution
         - Rebounds via negative binomial
         - Assists  via negative binomial
 
@@ -335,7 +335,7 @@ def simulate_player_props(conn=None) -> int:
     players = distributions["player_id"].astype(str).unique()
     logger.info(
         f"Simulating {SIMULATION_COUNT:,} games for {len(players)} players "
-        f"(lognormal pts | negbin reb/ast | copula combos)..."
+        f"(gamma pts | negbin reb/ast | copula combos)..."
     )
 
     t0      = time.time()
@@ -368,7 +368,7 @@ def simulate_player_props(conn=None) -> int:
         std_blk = max(dist_lookup.get(blk_key, {}).get("std_dev", 0.7), 0.5)
 
         # ── Individual prop simulations with better distributions ─────────
-        sim_pts = _sim_lognormal(rng, mean_pts, std_pts, SIMULATION_COUNT)
+        sim_pts = _sim_gamma(rng, mean_pts, std_pts, SIMULATION_COUNT)
         sim_reb = _sim_negbin(rng, mean_reb, std_reb, SIMULATION_COUNT)
         sim_ast = _sim_negbin(rng, mean_ast, std_ast, SIMULATION_COUNT)
         sim_stl = _sim_negbin(rng, mean_stl, std_stl, SIMULATION_COUNT)

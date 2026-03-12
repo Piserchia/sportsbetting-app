@@ -1,9 +1,10 @@
 """
 models/stat_models.py
-LightGBM regression models for points, rebounds, and assists.
+LightGBM regression models for points, rebounds, assists, steals, and blocks.
 
-Replaces the static weighted-average formula:
-    base = 0.5 * L10 + 0.3 * L5 + 0.2 * season_avg
+Position-specific models: trains separate models per position group
+(Guard=PG/SG, Forward=SF/PF, Center=C) for each stat, reducing bias
+from pooling players with different stat distributions.
 
 Each stat gets its own model with features:
     minutes_projection, usage_proxy,
@@ -15,8 +16,9 @@ Each stat gets its own model with features:
 Training: fit on all completed games in player_features joined to
           player_game_logs (actuals as targets)
 
-Falls back to the original weighted-average formula when fewer than
-MIN_TRAIN_ROWS training samples are available.
+Falls back to:
+  1. All-positions model when a position group has too few rows
+  2. Weighted-average formula when total data is insufficient
 """
 
 from __future__ import annotations
@@ -31,8 +33,26 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 MIN_TRAIN_ROWS = 300
+MIN_POSITION_ROWS = 150  # minimum rows to train a position-specific model
 
-_MODEL_CACHE: dict = {}   # {"points": model, "rebounds": model, "assists": model}
+POSITION_GROUPS = {
+    "Guard":   ["PG", "SG", "G", "G-F"],
+    "Forward": ["SF", "PF", "F", "F-G", "F-C"],
+    "Center":  ["C", "C-F"],
+}
+
+def _get_position_group(pos: str) -> str:
+    """Map a position string to Guard/Forward/Center group."""
+    if not pos or str(pos).strip() == "":
+        return "Forward"
+    pos = str(pos).strip().upper()
+    for group, positions in POSITION_GROUPS.items():
+        if pos in positions:
+            return group
+    return "Forward"
+
+# Cache keyed by (stat, position_group) or (stat, "all") for all-positions fallback
+_MODEL_CACHE: dict = {}
 
 STAT_FEATURES = {
     "points": [
@@ -312,45 +332,87 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
         latest.get("minutes_avg_last_10", pd.Series(20.0, index=latest.index))
     ).fillna(0.0).values
 
+    # Add position group to training data and latest for position-specific models
+    if "player_position" in train_df.columns:
+        train_df["position_group"] = train_df["player_position"].apply(_get_position_group)
+    else:
+        train_df["position_group"] = "Forward"
+
+    if "player_position" in latest.columns:
+        latest["position_group"] = latest["player_position"].apply(_get_position_group)
+    else:
+        latest["position_group"] = "Forward"
+
     for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
         feat_cols = STAT_FEATURES[stat]
         available = [c for c in feat_cols if c in train_df.columns]
 
-        X_all   = features_df[available].fillna(0.0)
-        X_train_df = train_df[available].fillna(0.0)
-
         # player_game_logs column name for this stat
-        actual_col = stat  # points, rebounds, assists, steals, blocks
+        actual_col = stat
         if actual_col not in train_df.columns:
             actual_col = stat + "s"
 
-        y_train = train_df.get(actual_col, train_df.get(stat, None))
+        y_train_all = train_df.get(actual_col, train_df.get(stat, None))
 
-        if y_train is None:
+        if y_train_all is None:
             logger.warning(f"  No actuals for {stat} — using fallback")
             result[f"{stat}_mean"] = _weighted_avg_fallback(latest, stat)
             continue
 
-        use_lgbm = len(X_train_df) >= MIN_TRAIN_ROWS
+        # Train position-specific models
+        for pos_group in ["Guard", "Forward", "Center"]:
+            cache_key = (stat, pos_group)
+            if not force_retrain and cache_key in _MODEL_CACHE:
+                continue
 
-        if use_lgbm and (force_retrain or stat not in _MODEL_CACHE):
-            logger.info(f"  Training LightGBM [{stat}] on {len(X_train_df):,} rows...")
+            pos_mask = train_df["position_group"] == pos_group
+            X_pos = train_df.loc[pos_mask, available].fillna(0.0)
+            y_pos = y_train_all.loc[pos_mask]
+
+            if len(X_pos) >= MIN_POSITION_ROWS:
+                try:
+                    model = _train_lgbm(X_pos, y_pos, f"{stat}/{pos_group}")
+                    _MODEL_CACHE[cache_key] = model
+                except Exception as e:
+                    logger.warning(f"  [{stat}/{pos_group}] LightGBM failed: {e}")
+            else:
+                logger.info(f"  [{stat}/{pos_group}] only {len(X_pos)} rows — will use all-positions model")
+
+        # Train all-positions fallback model
+        all_cache_key = (stat, "all")
+        X_train_all = train_df[available].fillna(0.0)
+        if len(X_train_all) >= MIN_TRAIN_ROWS and (force_retrain or all_cache_key not in _MODEL_CACHE):
             try:
-                model = _train_lgbm(X_train_df, y_train, stat)
-                _MODEL_CACHE[stat] = model
+                model = _train_lgbm(X_train_all, y_train_all, f"{stat}/all")
+                _MODEL_CACHE[all_cache_key] = model
             except Exception as e:
-                logger.warning(f"  [{stat}] LightGBM failed: {e} — fallback")
-                use_lgbm = False
+                logger.warning(f"  [{stat}/all] LightGBM failed: {e}")
 
-        X_latest = latest[available].fillna(0.0)
+        # Predict per position group
+        preds = pd.Series(index=latest.index, dtype=float)
+        for pos_group in ["Guard", "Forward", "Center"]:
+            pos_mask = latest["position_group"] == pos_group
+            if not pos_mask.any():
+                continue
 
-        if use_lgbm and stat in _MODEL_CACHE:
-            preds = _MODEL_CACHE[stat].predict(X_latest)
-            result[f"{stat}_mean"] = np.clip(preds, 0.0, None).round(4)
-            logger.info(f"  [{stat}] projections via LightGBM.")
-        else:
-            result[f"{stat}_mean"] = _weighted_avg_fallback(latest, stat)
-            logger.info(f"  [{stat}] projections via weighted-average fallback.")
+            X_pos_latest = latest.loc[pos_mask, available].fillna(0.0)
+            cache_key = (stat, pos_group)
+
+            if cache_key in _MODEL_CACHE:
+                preds.loc[pos_mask] = np.clip(
+                    _MODEL_CACHE[cache_key].predict(X_pos_latest), 0.0, None
+                ).round(4)
+                logger.info(f"  [{stat}/{pos_group}] projections via position-specific LightGBM.")
+            elif (stat, "all") in _MODEL_CACHE:
+                preds.loc[pos_mask] = np.clip(
+                    _MODEL_CACHE[(stat, "all")].predict(X_pos_latest), 0.0, None
+                ).round(4)
+                logger.info(f"  [{stat}/{pos_group}] projections via all-positions LightGBM fallback.")
+            else:
+                preds.loc[pos_mask] = _weighted_avg_fallback(latest.loc[pos_mask], stat)
+                logger.info(f"  [{stat}/{pos_group}] projections via weighted-average fallback.")
+
+        result[f"{stat}_mean"] = preds
 
 
 
@@ -366,11 +428,16 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
 def get_feature_importances() -> dict[str, pd.DataFrame]:
     """Return feature importances for each trained stat model."""
     out = {}
-    for stat, model in _MODEL_CACHE.items():
+    for key, model in _MODEL_CACHE.items():
+        if isinstance(key, tuple):
+            stat, pos_group = key
+        else:
+            stat, pos_group = key, "all"
         if stat in ("points", "rebounds", "assists", "steals", "blocks"):
             feats = STAT_FEATURES[stat]
             imps  = model.feature_importance(importance_type="gain")
-            out[stat] = pd.DataFrame({
+            label = f"{stat}/{pos_group}"
+            out[label] = pd.DataFrame({
                 "feature":    feats[:len(imps)],
                 "importance": imps,
             }).sort_values("importance", ascending=False)

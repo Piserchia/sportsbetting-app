@@ -85,6 +85,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 from typing import Optional
+from hashlib import md5
 
 from backend.db.connection import get_connection, init_model_schema
 
@@ -421,6 +422,23 @@ def ingest_props(
             stat, float(line), over_odds, under_odds, book, market,
             is_alternate
         ])
+
+        # Append to prop_line_history (append-only, captures every snapshot)
+        now = datetime.now(timezone.utc).isoformat()
+        history_id = md5(f"{now}_{book}_{player_id}_{stat}_{line}".encode()).hexdigest()
+        try:
+            conn.execute("""
+                INSERT INTO prop_line_history (
+                    history_id, fetched_at, book, player_id, player_name,
+                    game_id, stat, line, over_odds, under_odds
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, [
+                history_id, now, book, player_id, player_name,
+                game_id, stat, float(line), over_odds, under_odds
+            ])
+        except Exception:
+            pass  # history table may not exist yet
+
         records += 1
 
     if unmatched:

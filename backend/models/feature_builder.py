@@ -25,6 +25,8 @@ from backend.models.defense_features import build_defense_features
 from backend.models.minutes_model    import build_minutes_features
 from backend.models.usage_features   import build_usage_features
 from backend.models.positional_defense_features import build_positional_defense_features
+from backend.models.advanced_defense_features import build_advanced_defense_features
+from backend.models.lineup_features import build_lineup_features
 from backend.ingestion.injury_lineup_ingestor import get_teammate_injury_multipliers
 
 logger = logging.getLogger(__name__)
@@ -179,7 +181,16 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         logger.warning(f"  Usage features failed: {e} — skipping")
         usage_df = pd.DataFrame()
 
-    # ── 6b. Positional defense features ─────────────────────────────────
+    # ── 6b. Advanced defense features (possession-adjusted ratings) ────
+    logger.info("  Computing advanced defense features...")
+    try:
+        adv_def_df = build_advanced_defense_features(conn=conn)
+        logger.info(f"  → {len(adv_def_df)} advanced defense feature rows")
+    except Exception as e:
+        logger.warning(f"  Advanced defense features failed: {e} — skipping")
+        adv_def_df = pd.DataFrame()
+
+    # ── 6c. Positional defense features ─────────────────────────────────
     logger.info("  Computing positional defense features...")
     try:
         pos_def_df = build_positional_defense_features(conn=conn)
@@ -259,7 +270,19 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         else:
             features[col] = features[col].fillna(default)
 
-    # ── 6c. Injury context — boost usage_proxy for players with injured teammates ──
+    if not adv_def_df.empty:
+        features = features.merge(adv_def_df, on=key, how="left")
+    for col, default in [
+        ("team_off_rating", 110.0),
+        ("opponent_def_rating", 110.0),
+        ("rating_matchup_factor", 1.0),
+    ]:
+        if col not in features.columns:
+            features[col] = default
+        else:
+            features[col] = features[col].fillna(default)
+
+    # ── 6d. Injury context — boost usage_proxy for players with injured teammates ──
     logger.info("  Applying injury context to usage_proxy...")
     try:
         injury_multipliers = get_teammate_injury_multipliers(conn=conn)
@@ -276,6 +299,23 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
             logger.info("  → No injury multipliers available (no injured teammates found)")
     except Exception as e:
         logger.warning(f"  Injury context failed: {e} — skipping")
+
+    # ── 6e. Lineup impact features ────────────────────────────────────────
+    logger.info("  Computing lineup impact features...")
+    try:
+        lineup_df = build_lineup_features(conn=conn)
+        logger.info(f"  → {len(lineup_df)} lineup feature rows")
+    except Exception as e:
+        logger.warning(f"  Lineup features failed: {e} — skipping")
+        lineup_df = pd.DataFrame()
+
+    if not lineup_df.empty:
+        features = features.merge(lineup_df, on=key, how="left")
+    for col in ["usage_delta_teammate_out", "assist_delta_teammate_out", "rebound_delta_teammate_out"]:
+        if col not in features.columns:
+            features[col] = 0.0
+        else:
+            features[col] = features[col].fillna(0.0)
 
     if not pos_def_df.empty:
         pos_def_df["player_id"] = pos_def_df["player_id"].astype(str)
@@ -318,6 +358,8 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         "opponent_steals_allowed", "opponent_blocks_allowed",
         "defense_adj_stl", "defense_adj_blk",
         "usage_proxy", "usage_trend_last_5",
+        "team_off_rating", "opponent_def_rating", "rating_matchup_factor",
+        "usage_delta_teammate_out", "assist_delta_teammate_out", "rebound_delta_teammate_out",
         "positional_defense_adj_pts", "positional_defense_adj_reb", "positional_defense_adj_ast",
         "defense_vs_pg", "defense_vs_sg", "defense_vs_sf", "defense_vs_pf", "defense_vs_c",
         "player_position",

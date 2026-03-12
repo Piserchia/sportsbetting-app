@@ -388,6 +388,12 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("opponent_blocks_allowed",       "DOUBLE",  "5.0"),
         ("defense_adj_stl",               "DOUBLE",  "1.0"),
         ("defense_adj_blk",               "DOUBLE",  "1.0"),
+        ("team_off_rating",               "DOUBLE",  "110.0"),
+        ("opponent_def_rating",           "DOUBLE",  "110.0"),
+        ("rating_matchup_factor",         "DOUBLE",  "1.0"),
+        ("usage_delta_teammate_out",      "DOUBLE",  "0.0"),
+        ("assist_delta_teammate_out",     "DOUBLE",  "0.0"),
+        ("rebound_delta_teammate_out",    "DOUBLE",  "0.0"),
     ]
     existing_cols = {
         row[0]: row[1] for row in conn.execute(
@@ -465,6 +471,33 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             roi             DOUBLE,
             avg_edge        DOUBLE,
             created_at      TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS prop_line_history (
+            history_id      TEXT PRIMARY KEY,
+            fetched_at      TIMESTAMP,
+            book            TEXT,
+            player_id       TEXT,
+            player_name     TEXT,
+            game_id         TEXT,
+            stat            TEXT,
+            line            DOUBLE,
+            over_odds       DOUBLE,
+            under_odds      DOUBLE
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS team_advanced_stats (
+            game_id         TEXT,
+            team_id         INTEGER,
+            off_rating      DOUBLE,
+            def_rating      DOUBLE,
+            pace            DOUBLE,
+            possessions     DOUBLE,
+            PRIMARY KEY (game_id, team_id)
         )
     """)
 

@@ -5,10 +5,12 @@ LightGBM-trained minutes projection model.
 Replaces the heuristic formula with a trained regression model that learns
 optimal weights from historical data.
 
-Features:
-    rolling_minutes_last_5, rolling_minutes_last_10
-    games_started_last_5, minutes_trend
-    spread, pace, home_vs_away, days_rest, back_to_back
+Features (expanded v2):
+    minutes_l5, minutes_l10, minutes_trend, games_started,
+    rotation_players_last_5, usage_proxy,
+    team_pace, opponent_pace, pace_adjustment_factor,
+    spread, team_total, is_home, days_rest, back_to_back,
+    injury_usage_boost
 
 Outputs:
     minutes_avg_last_5, minutes_avg_last_10, minutes_trend,
@@ -85,6 +87,7 @@ def _get_context_data(conn) -> tuple:
     spreads = {}
     paces = {}
     home_games = {}
+    totals = {}
 
     try:
         rows = conn.execute("""
@@ -93,6 +96,18 @@ def _get_context_data(conn) -> tuple:
             GROUP BY game_id
         """).fetchall()
         spreads = {r[0]: float(r[1]) for r in rows}
+    except Exception:
+        pass
+
+    try:
+        rows = conn.execute("""
+            SELECT
+                game_id,
+                AVG(CASE WHEN market = 'totals' THEN home_point END) AS team_total
+            FROM odds WHERE home_point IS NOT NULL
+            GROUP BY game_id
+        """).fetchall()
+        totals = {r[0]: float(r[1]) if r[1] else 220.0 for r in rows}
     except Exception:
         pass
 
@@ -111,10 +126,10 @@ def _get_context_data(conn) -> tuple:
     except Exception:
         pass
 
-    return spreads, paces, home_games
+    return spreads, paces, home_games, totals
 
 
-def _build_training_data(logs_df, spreads, paces, home_games):
+def _build_training_data(logs_df, spreads, paces, home_games, totals):
     records = []
     for player_id, group in logs_df.groupby("player_id"):
         group = group.sort_values("game_date").reset_index(drop=True)
@@ -136,13 +151,15 @@ def _build_training_data(logs_df, spreads, paces, home_games):
             game_id = row["game_id"]
             team = row.get("team", "")
             home_abbr = home_games.get(game_id, "")
+            pace_val = paces.get(game_id, 110.0)
             records.append({
                 "minutes_l5":    float(avg_l5.iloc[i]),
                 "minutes_l10":   float(avg_l10.iloc[i]),
                 "minutes_trend": float(trend.iloc[i]),
                 "games_started": float(starts_l5.iloc[i]),
                 "spread":        spreads.get(game_id, 5.0),
-                "pace":          paces.get(game_id, 110.0),
+                "pace":          pace_val,
+                "team_total":    totals.get(game_id, 220.0),
                 "is_home":       1 if team and team == home_abbr else 0,
                 "days_rest":     float(days_rest.iloc[i]),
                 "back_to_back":  1 if float(days_rest.iloc[i]) <= 1 else 0,
@@ -153,20 +170,22 @@ def _build_training_data(logs_df, spreads, paces, home_games):
 
 def _train_lgb_model(train_df):
     features = ["minutes_l5", "minutes_l10", "minutes_trend",
-                "games_started", "spread", "pace", "is_home",
-                "days_rest", "back_to_back"]
-    X = train_df[features].fillna(0)
+                "games_started", "spread", "pace", "team_total",
+                "is_home", "days_rest", "back_to_back"]
+    available = [f for f in features if f in train_df.columns]
+    X = train_df[available].fillna(0)
     y = train_df["target"]
     params = {
-        "objective": "regression", "metric": "rmse",
-        "num_leaves": 31, "learning_rate": 0.05,
-        "feature_fraction": 0.8, "bagging_fraction": 0.8,
-        "bagging_freq": 5, "n_estimators": 300,
-        "min_child_samples": 10, "verbose": -1,
+        "objective": "regression_l2", "metric": "rmse",
+        "num_leaves": 64, "learning_rate": 0.03,
+        "min_child_samples": 25,
+        "feature_fraction": 0.85, "bagging_fraction": 0.9,
+        "bagging_freq": 5, "n_estimators": 600,
+        "verbose": -1,
     }
     model = lgb.LGBMRegressor(**params)
     model.fit(X, y)
-    return model, features
+    return model, available
 
 
 def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
@@ -174,7 +193,7 @@ def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
     if close:
         conn = get_connection()
     try:
-        spreads, paces, home_games = _get_context_data(conn)
+        spreads, paces, home_games, totals = _get_context_data(conn)
     finally:
         if close:
             conn.close()
@@ -184,7 +203,7 @@ def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
 
     if model is None and HAS_LGB:
         try:
-            train_df = _build_training_data(logs_df, spreads, paces, home_games)
+            train_df = _build_training_data(logs_df, spreads, paces, home_games, totals)
             if len(train_df) >= MIN_TRAIN_ROWS:
                 model, feature_names = _train_lgb_model(train_df)
                 logger.info(f"  LightGBM minutes model trained in-memory on {len(train_df):,} samples.")
@@ -224,7 +243,9 @@ def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
                 feats = pd.DataFrame([{
                     "minutes_l5": l5, "minutes_l10": l10, "minutes_trend": slp,
                     "games_started": float(starts_l5.iloc[i]),
-                    "spread": spread, "pace": pace, "is_home": is_home,
+                    "spread": spread, "pace": pace,
+                    "team_total": totals.get(game_id, 220.0),
+                    "is_home": is_home,
                     "days_rest": rest, "back_to_back": b2b,
                 }])
                 proj = float(model.predict(feats[feature_names])[0])
