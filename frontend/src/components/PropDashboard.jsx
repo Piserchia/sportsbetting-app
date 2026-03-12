@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import PipelineStatus from "./PipelineStatus";
+import EdgesDashboard from "./EdgesDashboard";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, AreaChart, Area, Cell,
@@ -326,6 +327,7 @@ export default function PropDashboard() {
           <div style={{ display: "flex", gap: 2, marginLeft: 16 }}>
             {[
               { key: "props",    label: "Props" },
+              { key: "edges",    label: "Edges" },
               { key: "pipeline", label: "Pipeline" },
             ].map(tab => (
               <button
@@ -353,6 +355,9 @@ export default function PropDashboard() {
       </div>
 
       {page === "pipeline" && <PipelineStatus />}
+      {page === "edges" && (
+        <EdgesDashboard onPlayerSelect={p => { setPage("props"); handleSelect(p); }} />
+      )}
 
       {page === "props" && <div style={{ maxWidth: 1400, margin: "0 auto", padding: "24px 28px" }}>
 

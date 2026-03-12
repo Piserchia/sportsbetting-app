@@ -78,6 +78,11 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
                             f"({len(existing)} game_ids already built)")
                 if logs.empty:
                     logger.info("  All games already in player_features — nothing to do.")
+                    n_existing = len(existing)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+                        [str(uuid.uuid4()), "feature_builder", "player_features", n_existing, "success", "incremental — up to date"]
+                    )
                     if close:
                         conn.close()
                     return 0

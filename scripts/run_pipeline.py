@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.logging_config import setup_logging
 from backend.db.connection import get_connection, init_schema
 from backend.ingestion.nba_ingestor import (
-    ingest_teams, ingest_players, ingest_games, ingest_box_scores
+    ingest_teams, ingest_players, ingest_games, ingest_schedule, ingest_box_scores
 )
 from backend.ingestion.odds_ingestor import ingest_odds
 from backend.ingestion.props_ingestor import ingest_props
@@ -30,6 +30,9 @@ from backend.ingestion.injury_lineup_ingestor import ingest_injuries_and_lineups
 from backend.models.feature_builder import build_player_features
 from backend.models.projection_model import generate_projections
 from backend.models.simulation_engine import simulate_player_props
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from calculate_edges import calculate_edges
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -47,6 +50,7 @@ def run_pipeline(skip_box_scores: bool = False, full_rebuild: bool = False):
         ingest_teams(conn=conn)
         ingest_players(conn=conn)
         ingest_games(conn=conn)
+        ingest_schedule(conn=conn)
 
         if not skip_box_scores:
             seasons = os.getenv("NBA_SEASONS", "2024-25").split(",")
@@ -63,6 +67,7 @@ def run_pipeline(skip_box_scores: bool = False, full_rebuild: bool = False):
         build_player_features(conn=conn, incremental=not full_rebuild)
         generate_projections(conn=conn)
         simulate_player_props(conn=conn)
+        calculate_edges(conn=conn)
 
     except Exception as e:
         logger.error(f"Pipeline error: {e}")

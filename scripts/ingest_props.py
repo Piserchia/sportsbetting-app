@@ -7,14 +7,11 @@ Requires SPORTSGAMEODDS_API_KEY in config/.env
 Sign up at https://sportsgameodds.com
 
 Usage:
-    python scripts/ingest_props.py                    # standard + alternate lines
-    python scripts/ingest_props.py --no-alternates    # standard lines only
-    python scripts/ingest_props.py --markets player-points-over-under player-rebounds-over-under
+    python scripts/ingest_props.py
 """
 
 import sys
 import os
-import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.logging_config import setup_logging
@@ -24,23 +21,8 @@ from backend.ingestion.props_ingestor import ingest_props, get_available_markets
 setup_logging()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--no-alternates", action="store_true",
-        help="Skip alternate line ladders (fetch standard O/U lines only)"
-    )
-    parser.add_argument(
-        "--markets", nargs="+", default=None,
-        help="Specific market oddIDs to fetch (overrides defaults)"
-    )
-    args = parser.parse_args()
-
     conn  = get_connection()
-    count = ingest_props(
-        markets=args.markets,
-        include_alternates=not args.no_alternates,
-        conn=conn
-    )
+    count = ingest_props(conn=conn)
 
     if count > 0:
         print(f"\n✅ Props ingestion complete — {count:,} rows written to sportsbook_props.")
@@ -48,5 +30,3 @@ if __name__ == "__main__":
         print(get_available_markets(conn=conn).to_string(index=False))
     else:
         print("⚠️  No props written. Check SPORTSGAMEODDS_API_KEY in config/.env")
-
-    conn.close()

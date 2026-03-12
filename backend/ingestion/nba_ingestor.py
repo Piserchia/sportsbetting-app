@@ -18,6 +18,7 @@ from nba_api.stats.endpoints import (
     leaguegamelog,
     boxscoretraditionalv3,
     teamgamelog,
+    scheduleleaguev2,
 )
 
 from backend.db.connection import get_connection
@@ -193,6 +194,97 @@ def ingest_games(seasons: Optional[list] = None, conn=None) -> int:
         except Exception as e:
             logger.error(f"  Error ingesting games for {season}: {e}")
             _log_ingestion(conn, "nba_api", f"games:{season}", 0, "error", str(e))
+
+    if close:
+        conn.close()
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Full schedule (past + upcoming) via ScheduleLeagueV2
+# ---------------------------------------------------------------------------
+
+def ingest_schedule(seasons: Optional[list] = None, conn=None) -> int:
+    """
+    Upserts the full season schedule (past AND upcoming games) using
+    ScheduleLeagueV2. Complements ingest_games() which only returns
+    completed games via LeagueGameLog.
+
+    Sets status to:
+      'Final'    — gameStatus == 3
+      'Live'     — gameStatus == 2
+      'Upcoming' — gameStatus == 1
+    """
+    close = conn is None
+    conn = conn or get_connection()
+    seasons = seasons or NBA_SEASONS
+    total = 0
+
+    # Build team_id lookup from teams table
+    team_rows = conn.execute("SELECT team_id, abbreviation FROM teams").fetchall()
+    abbr_to_id = {row[1]: row[0] for row in team_rows}
+
+    for season in seasons:
+        logger.info(f"Ingesting full schedule for season {season}...")
+        try:
+            _sleep()
+            sched = _fetch_with_retry(
+                scheduleleaguev2.ScheduleLeagueV2,
+                season=season,
+                league_id="00",
+            )
+            df = sched.get_data_frames()[0]
+
+            # Filter to regular season only (gameId prefix 002 = regular season)
+            df = df[df["gameId"].astype(str).str.startswith("002")]
+
+            STATUS_MAP = {1: "Upcoming", 2: "Live", 3: "Final"}
+            records = 0
+
+            for _, row in df.iterrows():
+                game_id      = str(row["gameId"])
+                raw_date     = str(row["gameDate"])  # "MM/DD/YYYY HH:MM:SS"
+                game_date    = pd.to_datetime(raw_date).date()
+                game_status  = int(row.get("gameStatus", 1))
+                status_str   = STATUS_MAP.get(game_status, "Upcoming")
+
+                home_abbr    = str(row.get("homeTeam_teamTricode", "")).strip()
+                away_abbr    = str(row.get("awayTeam_teamTricode", "")).strip()
+                home_team_id = int(row.get("homeTeam_teamId", 0)) or abbr_to_id.get(home_abbr)
+                away_team_id = int(row.get("awayTeam_teamId", 0)) or abbr_to_id.get(away_abbr)
+
+                home_score_raw = row.get("homeTeam_score")
+                away_score_raw = row.get("awayTeam_score")
+                home_score = int(home_score_raw) if pd.notna(home_score_raw) and home_score_raw else None
+                away_score = int(away_score_raw) if pd.notna(away_score_raw) and away_score_raw else None
+
+                conn.execute("""
+                    INSERT INTO games
+                        (game_id, season, game_date, home_team_id, away_team_id,
+                         home_team_abbr, away_team_abbr, home_score, away_score,
+                         status, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+                    ON CONFLICT (game_id) DO UPDATE SET
+                        status     = excluded.status,
+                        home_score = excluded.home_score,
+                        away_score = excluded.away_score,
+                        updated_at = now()
+                """, [
+                    game_id, season, game_date,
+                    home_team_id, away_team_id,
+                    home_abbr, away_abbr,
+                    home_score, away_score,
+                    status_str,
+                ])
+                records += 1
+
+            _log_ingestion(conn, "nba_api", f"schedule:{season}", records, "success")
+            logger.info(f"  → {records} schedule rows upserted for {season}.")
+            total += records
+
+        except Exception as e:
+            logger.error(f"  Error ingesting schedule for {season}: {e}")
+            _log_ingestion(conn, "nba_api", f"schedule:{season}", 0, "error", str(e))
 
     if close:
         conn.close()

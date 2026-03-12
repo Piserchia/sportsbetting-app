@@ -522,6 +522,140 @@ def games_today():
         conn.close()
 
 
+@app.get("/edges/today")
+def edges_today(min_probability: float = 0.6, stat: Optional[str] = None):
+    """
+    Best prop edges for the most recent game date that has edge data.
+    Limited to top 3 lines per player, sorted by edge_percent (or model_probability
+    when no sportsbook data is available).
+
+    Falls back to the most recent date with edges if today has none.
+    """
+    conn = get_connection()
+    try:
+        # Find the best available date — prefer today, fall back to most recent
+        date_row = conn.execute("""
+            SELECT MAX(g.game_date)
+            FROM prop_edges pe
+            JOIN games g ON pe.game_id = g.game_id
+            WHERE g.game_date <= CURRENT_DATE
+        """).fetchone()
+
+        if not date_row or not date_row[0]:
+            return {"date": None, "edges": [], "source": "none"}
+
+        target_date = date_row[0]
+        is_today = (str(target_date) == str(date.today()))
+
+        stat_filter = "AND pe.stat = ?" if stat else ""
+        params = [target_date, min_probability]
+        if stat:
+            params.insert(1, stat)
+
+        PROJ_COL = {
+            "points": "pp.points_mean", "rebounds": "pp.rebounds_mean",
+            "assists": "pp.assists_mean", "steals": "pp.steals_mean",
+            "blocks": "pp.blocks_mean",
+        }
+
+        def _edge_query(extra_where: str) -> str:
+            return f"""
+                SELECT
+                    pe.game_id,
+                    pe.player_id,
+                    p.full_name,
+                    t.abbreviation AS team,
+                    g.home_team_abbr,
+                    g.away_team_abbr,
+                    pe.stat,
+                    pe.line,
+                    pe.model_probability,
+                    pe.fair_odds,
+                    pe.sportsbook_odds,
+                    pe.edge_percent,
+                    pe.book,
+                    pe.expected_value,
+                    pp.points_mean,
+                    pp.rebounds_mean,
+                    pp.assists_mean,
+                    pp.steals_mean,
+                    pp.blocks_mean,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pe.player_id, pe.stat
+                        ORDER BY COALESCE(pe.edge_percent, pe.model_probability) DESC
+                    ) AS rn
+                FROM prop_edges pe
+                JOIN games g ON pe.game_id = g.game_id
+                JOIN players p ON CAST(pe.player_id AS INTEGER) = p.player_id
+                LEFT JOIN (
+                    SELECT player_id, team_id,
+                           ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) AS team_rn
+                    FROM player_game_stats
+                ) latest ON CAST(pe.player_id AS INTEGER) = latest.player_id AND latest.team_rn = 1
+                LEFT JOIN teams t ON latest.team_id = t.team_id
+                LEFT JOIN (
+                    SELECT player_id, points_mean, rebounds_mean, assists_mean,
+                           steals_mean, blocks_mean,
+                           ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) AS proj_rn
+                    FROM player_projections
+                ) pp ON pe.player_id = pp.player_id AND pp.proj_rn = 1
+                WHERE g.game_date = ?
+                {stat_filter}
+                AND pe.model_probability >= ?
+                AND (pe.fair_odds IS NULL OR pe.fair_odds > -1000)
+                {extra_where}
+                QUALIFY rn <= 3
+                ORDER BY COALESCE(pe.edge_percent, 0) DESC, pe.model_probability DESC
+            """
+
+        rows = conn.execute(_edge_query("AND pe.book != 'model_only'"), params).fetchall()
+
+        # If no sportsbook rows, fall back to model_only
+        if not rows:
+            params_mo = [target_date, min_probability]
+            if stat:
+                params_mo.insert(1, stat)
+            rows = conn.execute(_edge_query(""), params_mo).fetchall()
+
+        STAT_MEAN_IDX = {"points": 14, "rebounds": 15, "assists": 16, "steals": 17, "blocks": 18}
+
+        edges = []
+        for r in rows:
+            home, away = r[4], r[5]
+            team = r[3] or "—"
+            matchup = f"{away} @ {home}" if home and away else "—"
+            stat_name = r[6]
+            mean_idx = STAT_MEAN_IDX.get(stat_name)
+            model_mean = round(float(r[mean_idx]), 1) if mean_idx and r[mean_idx] else None
+            edges.append({
+                "game_id":           r[0],
+                "player_id":         r[1],
+                "player_name":       r[2],
+                "team":              team,
+                "matchup":           matchup,
+                "stat":              stat_name,
+                "line":              float(r[7]),
+                "model_mean":        model_mean,
+                "model_probability": round(float(r[8]), 4) if r[8] else None,
+                "fair_odds":         int(r[9]) if r[9] else None,
+                "sportsbook_odds":   r[10],
+                "edge_percent":      round(float(r[11]), 2) if r[11] else None,
+                "book":              r[12],
+                "expected_value":    round(float(r[13]), 4) if r[13] else None,
+            })
+
+        has_book_data = any(e["edge_percent"] is not None for e in edges)
+
+        return {
+            "date":          str(target_date),
+            "is_today":      is_today,
+            "source":        "sportsbook" if has_book_data else "model_only",
+            "edges":         edges,
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/pipeline/status")
 def pipeline_status():
     """

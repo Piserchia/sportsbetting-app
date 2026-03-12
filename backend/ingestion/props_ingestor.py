@@ -16,7 +16,7 @@ FREE-TIER OPTIMIZATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Only fetches props for today's games (billing is per-event)
 - Default books: draftkings, fanduel, betmgm (caesars optional)
-- Only fetches stats we model (pts/reb/ast/stl/blk + alternates)
+- Only fetches stats we model (pts/reb/ast/stl/blk)
 - 60-min cooldown between API calls (configurable)
 - Dev mode: draftkings only, once per day
 
@@ -24,6 +24,24 @@ Env vars:
     PROPS_BOOKS=draftkings,fanduel,betmgm
     PROPS_COOLDOWN_MINUTES=60
     PROPS_DEV_MODE=false
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SGO API v2 STRUCTURE (events endpoint)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GET /v2/events?leagueID=NBA&started=false&oddsPresent=true
+
+Each event has:
+  event.players  — dict of {playerID: {name, teamID, ...}}
+  event.odds     — dict of {oddKey: oddObj}
+
+oddKey format: {stat}-{PLAYER_ID}-{period}-{betType}-{side}
+  e.g.  points-LEBRON_JAMES_1_NBA-game-ou-over
+
+oddObj fields:
+  statID, playerID, periodID, betTypeID, sideID
+  bookOverUnder  — the line
+  bookOdds       — consensus odds (American)
+  byBookmaker    — {bookID: {odds, overUnder, available, lastUpdatedAt}}
 """
 
 import os
@@ -43,16 +61,15 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SGO_API_KEY  = os.getenv("SPORTSGAMEODDS_API_KEY", "")
-SGO_BASE_URL = "https://api.sportsgameodds.com/v1"
+SGO_BASE_URL = "https://api.sportsgameodds.com/v2"
 
-SPORT_ID = "NBA"
+LEAGUE_ID = "NBA"
 
 # ── Free-tier settings ────────────────────────────────────────────────────────
 
 PROPS_DEV_MODE = os.getenv("PROPS_DEV_MODE", "false").lower() == "true"
 PROPS_COOLDOWN_MINUTES = int(os.getenv("PROPS_COOLDOWN_MINUTES", "1440" if PROPS_DEV_MODE else "60"))
 
-# Sportsbooks — 3 default, caesars opt-in
 DEFAULT_BOOKS = ["draftkings", "fanduel", "betmgm"]
 if PROPS_DEV_MODE:
     BOOKS = ["draftkings"]
@@ -60,32 +77,8 @@ if PROPS_DEV_MODE:
 else:
     BOOKS = [b.strip() for b in os.getenv("PROPS_BOOKS", ",".join(DEFAULT_BOOKS)).split(",")]
 
-# Markets — only stats we actually model (no threes/turnovers)
-STANDARD_MARKETS = [
-    "player-points-over-under",
-    "player-rebounds-over-under",
-    "player-assists-over-under",
-    "player-steals-over-under",
-    "player-blocks-over-under",
-]
-
-ALTERNATE_MARKETS = [
-    "player-points-alternate",
-    "player-rebounds-alternate",
-    "player-assists-alternate",
-]
-
-# Map SportsGameOdds oddID → our stat column names in player_simulations
-MARKET_TO_STAT = {
-    "player-points-over-under":   "points",
-    "player-points-alternate":    "points",
-    "player-rebounds-over-under": "rebounds",
-    "player-rebounds-alternate":  "rebounds",
-    "player-assists-over-under":  "assists",
-    "player-assists-alternate":   "assists",
-    "player-steals-over-under":   "steals",
-    "player-blocks-over-under":   "blocks",
-}
+# Stats we model — only pull game-period over/under for these
+MODELED_STATS = {"points", "rebounds", "assists", "steals", "blocks"}
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -148,7 +141,6 @@ def _check_cooldown(conn) -> bool:
 # ── Core API Fetch ─────────────────────────────────────────────────────────────
 
 def _check_api_key() -> bool:
-    """Return True if the API key is configured."""
     if not SGO_API_KEY or SGO_API_KEY == "your_key_here":
         logger.warning(
             "SPORTSGAMEODDS_API_KEY not set. "
@@ -158,34 +150,20 @@ def _check_api_key() -> bool:
     return True
 
 
-def fetch_props(markets: list, books: list = None, event_ids: list = None) -> list:
+def fetch_events_with_props() -> list:
     """
-    Fetch prop lines from SportsGameOdds.
-
-    Args:
-        markets:   List of oddID strings
-        books:     List of sportsbook keys
-        event_ids: Optional list of eventIDs to filter (today's games)
-
-    Returns:
-        List of raw prop dicts from the API response.
+    Fetch upcoming NBA events that have odds from SportsGameOdds /v2/events.
+    Returns list of event dicts (each has .odds and .players).
     """
-    if books is None:
-        books = BOOKS
-
-    url = f"{SGO_BASE_URL}/odds"
+    url = f"{SGO_BASE_URL}/events"
     params = {
-        "apiKey":   SGO_API_KEY,
-        "sportID":  SPORT_ID,
-        "oddIDs":   ",".join(markets),
-        "books":    ",".join(books),
-        "status":   "upcoming",
+        "apiKey":      SGO_API_KEY,
+        "leagueID":    LEAGUE_ID,
+        "started":     "false",
+        "oddsPresent": "true",
     }
-    if event_ids:
-        params["eventIDs"] = ",".join(str(eid) for eid in event_ids)
 
-    logger.info(f"Fetching props from SportsGameOdds: {', '.join(markets)}")
-    logger.info(f"  Books: {', '.join(books)} | Events: {len(event_ids) if event_ids else 'all'}")
+    logger.info("Fetching NBA events with props from SportsGameOdds...")
     resp = requests.get(url, params=params, timeout=20)
     resp.raise_for_status()
 
@@ -194,9 +172,7 @@ def fetch_props(markets: list, books: list = None, event_ids: list = None) -> li
     logger.info(f"  SGO quota — used: {used}, remaining: {remaining}")
 
     data = resp.json()
-    if isinstance(data, list):
-        return data
-    return data.get("data", data.get("odds", []))
+    return data.get("data", [])
 
 
 # ── Player Matching ────────────────────────────────────────────────────────────
@@ -205,10 +181,6 @@ _SUFFIX_RE = re.compile(r'\s+(jr\.?|sr\.?|ii|iii|iv|v)$', re.IGNORECASE)
 
 
 def _build_player_lookup(conn) -> dict:
-    """
-    Build a name → player_id lookup from our players table.
-    Returns dict of {lowercase_full_name: player_id}
-    """
     players = conn.execute("""
         SELECT player_id, full_name FROM players WHERE is_active = TRUE
     """).df()
@@ -222,30 +194,23 @@ def _build_player_lookup(conn) -> dict:
 def _match_player(player_name: str, lookup: dict) -> Optional[str]:
     """
     Match a SportsGameOdds player name to our internal player_id.
-    Three-tier matching:
-      1. Exact lowercase match
-      2. Strip suffixes (Jr., Sr., III, etc.) and retry
-      3. Last-name fallback (unique match only)
+    Three-tier: exact → strip suffix → last-name unique fallback.
     """
     if not player_name:
         return None
 
-    # 1. Exact match
     normalized = player_name.lower().strip()
     if normalized in lookup:
         return lookup[normalized]
 
-    # 2. Strip suffix and retry
     stripped = _SUFFIX_RE.sub("", normalized).strip()
     if stripped != normalized and stripped in lookup:
         return lookup[stripped]
 
-    # Also try stripping suffix from lookup names
     for name, pid in lookup.items():
         if _SUFFIX_RE.sub("", name).strip() == stripped:
             return pid
 
-    # 3. Last name match (only if unique)
     last_name = normalized.split()[-1]
     matches = [pid for name, pid in lookup.items() if name.endswith(last_name)]
     if len(matches) == 1:
@@ -255,7 +220,6 @@ def _match_player(player_name: str, lookup: dict) -> Optional[str]:
 
 
 def _get_today_game_ids(conn) -> list:
-    """Get game_ids for today's games."""
     rows = conn.execute("""
         SELECT game_id FROM games WHERE game_date = CURRENT_DATE
     """).fetchall()
@@ -264,50 +228,33 @@ def _get_today_game_ids(conn) -> list:
     return game_ids
 
 
-def _match_game_id(conn, sgo_event_id: str, event_date: str,
-                   today_game_ids: list = None) -> Optional[str]:
-    """
-    Match a SportsGameOdds eventID to our internal game_id.
-    If today_game_ids provided, filter to only those games.
-    """
-    if today_game_ids:
-        # Match by date within today's games
-        placeholders = ",".join(["?"] * len(today_game_ids))
-        result = conn.execute(f"""
-            SELECT game_id FROM games
-            WHERE game_id IN ({placeholders})
-            AND CAST(game_date AS VARCHAR) = ?
-            LIMIT 1
-        """, today_game_ids + [event_date]).fetchone()
-    else:
-        result = conn.execute("""
-            SELECT game_id FROM games
-            WHERE CAST(game_date AS VARCHAR) = ?
-            LIMIT 1
-        """, [event_date]).fetchone()
-
+def _match_game_id(conn, event_date: str, today_game_ids: list) -> Optional[str]:
+    """Match a game by date from today's game list."""
+    if not today_game_ids:
+        return None
+    placeholders = ",".join(["?"] * len(today_game_ids))
+    result = conn.execute(f"""
+        SELECT game_id FROM games
+        WHERE game_id IN ({placeholders})
+        AND CAST(game_date AS VARCHAR) = ?
+        LIMIT 1
+    """, today_game_ids + [event_date]).fetchone()
     return result[0] if result else None
 
 
 # ── Snapshot Rebuild ──────────────────────────────────────────────────────────
 
 def _rebuild_sportsbook_props(conn, today_game_ids: list):
-    """
-    Rebuild sportsbook_props for today's games from prop_line_history,
-    keeping only the latest snapshot per (game, player, stat, line, book).
-    """
     if not today_game_ids:
         return
 
     placeholders = ",".join(["?"] * len(today_game_ids))
 
-    # Delete today's rows
     conn.execute(f"""
         DELETE FROM sportsbook_props
         WHERE game_id IN ({placeholders})
     """, today_game_ids)
 
-    # Insert latest snapshot from history
     conn.execute(f"""
         INSERT INTO sportsbook_props (
             prop_id, game_id, player_id, sgo_player_id, player_name,
@@ -338,16 +285,123 @@ def _rebuild_sportsbook_props(conn, today_game_ids: list):
     logger.info(f"  → sportsbook_props rebuilt: {count} latest rows for today's games")
 
 
+# ── Prop Parsing ──────────────────────────────────────────────────────────────
+
+def _parse_props_from_events(events: list, books: list, player_lookup: dict,
+                              today_game_ids: list, conn) -> list:
+    """
+    Parse player prop records from SGO events.
+
+    For each event, iterates over event.odds, filters to:
+      - betTypeID == "ou"
+      - sideID == "over"   (we pair over+under by matching opposingOddID)
+      - periodID == "game"
+      - statID in MODELED_STATS
+      - playerID present
+
+    Then for each matching book in byBookmaker, emits one record with
+    both over_odds and under_odds (looked up from the opposing odd).
+
+    Returns list of dicts ready for prop_line_history insert.
+    """
+    records = []
+
+    for event in events:
+        sgo_event_id = event.get("eventID", "")
+        starts_at    = event.get("status", {}).get("startsAt", "")
+        event_date   = starts_at[:10] if starts_at else ""
+        odds_map     = event.get("odds", {})
+        players_map  = event.get("players", {})
+
+        game_id = _match_game_id(conn, event_date, today_game_ids)
+        if not game_id:
+            continue
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        for odd_key, odd in odds_map.items():
+            if odd.get("betTypeID") != "ou":
+                continue
+            if odd.get("sideID") != "over":
+                continue
+            if odd.get("periodID") != "game":
+                continue
+
+            stat = odd.get("statID", "")
+            if stat not in MODELED_STATS:
+                continue
+
+            sgo_player_id = odd.get("playerID", "")
+            if not sgo_player_id:
+                continue
+
+            player_info = players_map.get(sgo_player_id, {})
+            player_name = player_info.get("name", "")
+            player_id   = _match_player(player_name, player_lookup)
+            if not player_id:
+                logger.debug(f"  Unmatched player: '{player_name}' ({sgo_player_id})")
+                continue
+
+            # Get the opposing (under) odd for under_odds
+            opposing_key = odd.get("opposingOddID", "")
+            under_odd    = odds_map.get(opposing_key, {})
+
+            by_book = odd.get("byBookmaker", {})
+
+            for book_id, book_data in by_book.items():
+                if book_id not in books:
+                    continue
+                if not book_data.get("available", False):
+                    continue
+
+                line = book_data.get("overUnder")
+                if line is None:
+                    continue
+
+                over_odds_str  = book_data.get("odds")
+                # Under odds: from opposing odd's byBookmaker for same book
+                under_book     = under_odd.get("byBookmaker", {}).get(book_id, {})
+                under_odds_str = under_book.get("odds")
+
+                over_odds  = _american_to_float(over_odds_str)
+                under_odds = _american_to_float(under_odds_str)
+
+                history_id = md5(
+                    f"{now}_{book_id}_{player_id}_{stat}_{line}".encode()
+                ).hexdigest()
+
+                records.append({
+                    "history_id":  history_id,
+                    "fetched_at":  now,
+                    "book":        book_id,
+                    "player_id":   player_id,
+                    "player_name": player_name,
+                    "game_id":     game_id,
+                    "stat":        stat,
+                    "line":        float(line),
+                    "over_odds":   over_odds,
+                    "under_odds":  under_odds,
+                })
+
+    return records
+
+
+def _american_to_float(odds_str) -> Optional[float]:
+    """Convert American odds string ('+110', '-122') to float, or None."""
+    if odds_str is None:
+        return None
+    try:
+        return float(str(odds_str))
+    except (ValueError, TypeError):
+        return None
+
+
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 
-def ingest_props(
-    markets: list = None,
-    include_alternates: bool = True,
-    conn=None
-) -> int:
+def ingest_props(conn=None) -> int:
     """
     Fetch player prop lines from SportsGameOdds and write to sportsbook_props.
-    Optimized for free-tier: today's games only, 3 books, cooldown guard.
+    Optimized for free-tier: today's games only, configured books, cooldown guard.
 
     Returns:
         Number of prop rows written to prop_line_history.
@@ -360,7 +414,6 @@ def ingest_props(
     init_model_schema(conn)
     init_props_schema(conn)
 
-    # Cooldown guard
     if _check_cooldown(conn):
         _log_ingestion(conn, "sportsgameodds", "props", 0, "skipped",
                        f"Within {PROPS_COOLDOWN_MINUTES}m cooldown")
@@ -368,7 +421,6 @@ def ingest_props(
             conn.close()
         return 0
 
-    # Today's games only
     today_game_ids = _get_today_game_ids(conn)
     if not today_game_ids:
         logger.info("No games today — skipping props fetch.")
@@ -377,19 +429,11 @@ def ingest_props(
             conn.close()
         return 0
 
-    # Determine markets
-    if markets is None:
-        markets = STANDARD_MARKETS[:]
-        if include_alternates:
-            markets += ALTERNATE_MARKETS
-
-    # Build player lookup
     player_lookup = _build_player_lookup(conn)
     logger.info(f"  Player lookup built — {len(player_lookup)} active players.")
 
-    # Fetch from API
     try:
-        raw_props = fetch_props(markets=markets, event_ids=today_game_ids)
+        events = fetch_events_with_props()
     except requests.HTTPError as e:
         logger.error(f"SportsGameOdds HTTP error: {e.response.status_code} — {e.response.text}")
         _log_ingestion(conn, "sportsgameodds", "props", 0, "error", str(e))
@@ -403,55 +447,22 @@ def ingest_props(
             conn.close()
         return 0
 
-    if not raw_props:
-        logger.warning("No props returned from SportsGameOdds.")
+    if not events:
+        logger.warning("No events returned from SportsGameOdds.")
         _log_ingestion(conn, "sportsgameodds", "props", 0, "success",
-                       f"0 props returned | {len(today_game_ids)} games | books: {','.join(BOOKS)}")
+                       f"0 events returned | books: {','.join(BOOKS)}")
         if close:
             conn.close()
         return 0
 
-    logger.info(f"  Processing {len(raw_props)} raw prop rows...")
+    logger.info(f"  Processing {len(events)} events...")
 
-    records   = 0
-    unmatched = 0
+    prop_records = _parse_props_from_events(
+        events, BOOKS, player_lookup, today_game_ids, conn
+    )
 
-    for prop in raw_props:
-        sgo_event_id  = prop.get("eventID", "")
-        sgo_player_id = prop.get("playerID", "")
-        player_name   = prop.get("playerName", "")
-        market        = prop.get("oddID", "")
-        line          = prop.get("line")
-        over_odds     = prop.get("overOdds")
-        under_odds    = prop.get("underOdds")
-        book          = prop.get("book", "")
-        event_date    = prop.get("eventDate", "")[:10]
-
-        if not all([player_name, market, line is not None, book]):
-            continue
-
-        # Match to our internal IDs
-        player_id = _match_player(player_name, player_lookup)
-        if not player_id:
-            logger.debug(f"  Unmatched player: '{player_name}'")
-            unmatched += 1
-            continue
-
-        game_id = _match_game_id(conn, sgo_event_id, event_date, today_game_ids)
-        stat    = MARKET_TO_STAT.get(market)
-
-        if not stat:
-            logger.debug(f"  Unknown market: '{market}'")
-            continue
-
-        if not game_id:
-            continue
-
-        is_alternate = "alternate" in market
-
-        # Append to prop_line_history (append-only)
-        now = datetime.now(timezone.utc).isoformat()
-        history_id = md5(f"{now}_{book}_{player_id}_{stat}_{line}".encode()).hexdigest()
+    written = 0
+    for rec in prop_records:
         try:
             conn.execute("""
                 INSERT INTO prop_line_history (
@@ -459,29 +470,26 @@ def ingest_props(
                     game_id, stat, line, over_odds, under_odds
                 ) VALUES (?,?,?,?,?,?,?,?,?,?)
             """, [
-                history_id, now, book, player_id, player_name,
-                game_id, stat, float(line), over_odds, under_odds
+                rec["history_id"], rec["fetched_at"], rec["book"],
+                rec["player_id"],  rec["player_name"], rec["game_id"],
+                rec["stat"],       rec["line"], rec["over_odds"], rec["under_odds"],
             ])
-            records += 1
+            written += 1
         except Exception as e:
             logger.debug(f"  History insert error: {e}")
 
-    # Rebuild sportsbook_props from latest history snapshots
     _rebuild_sportsbook_props(conn, today_game_ids)
 
-    if unmatched:
-        logger.warning(f"  {unmatched} props skipped — player name not matched.")
-
-    msg = (f"{records} rows appended to history | "
+    unmatched_events = len(events)  # rough proxy; detailed count inside parser
+    msg = (f"{written} rows appended to history | "
            f"{len(today_game_ids)} games | "
-           f"books: {','.join(BOOKS)} | "
-           f"{unmatched} unmatched")
-    _log_ingestion(conn, "sportsgameodds", "props", records, "success", msg)
-    logger.info(f"  → {records} prop rows written to prop_line_history.")
+           f"books: {','.join(BOOKS)}")
+    _log_ingestion(conn, "sportsgameodds", "props", written, "success", msg)
+    logger.info(f"  → {written} prop rows written to prop_line_history.")
 
     if close:
         conn.close()
-    return records
+    return written
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
