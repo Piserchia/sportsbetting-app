@@ -1,8 +1,11 @@
-# PropModel — Architecture v2
+# PropModel — Model Architecture v2
 
-## What Changed
+## Overview
 
-Version 2 replaces every heuristic in the prediction pipeline with trained ML models and statistically-appropriate distributions. The data pipeline and API are unchanged.
+PropModel v2 replaces the heuristic projection system with trained ML models,
+statistically appropriate simulation distributions, and a backtesting framework.
+The pipeline architecture and DuckDB schema are unchanged — every upgrade is
+a drop-in replacement that falls back gracefully when training data is thin.
 
 ---
 
@@ -10,24 +13,21 @@ Version 2 replaces every heuristic in the prediction pipeline with trained ML mo
 
 **File:** `backend/models/minutes_model.py`
 
-The heuristic formula `0.5×L10 + 0.3×L5 + 0.2×trend` is replaced with a LightGBM regressor trained on historical minutes data. The model learns which features actually predict playing time rather than using fixed weights.
+### v1 → v2
+v1 used a heuristic: `0.5 * L10 + 0.3 * L5 + 0.2 * (L10 + slope*2)`
 
-**Training:** Fit on all completed games in `player_game_logs` where actual minutes > 0 (DNPs excluded). Requires ≥ 200 training rows; falls back to heuristic otherwise.
+v2 trains a LightGBM regression model on all historical player-game rows.
 
-**Features:**
-| Feature | Description |
-|---|---|
-| `minutes_l5` | Rolling 5-game average minutes |
-| `minutes_l10` | Rolling 10-game average minutes |
-| `minutes_trend` | Linear slope over last 10 games |
-| `games_started` | Games started in last 5 (proxy: mins ≥ 28) |
-| `spread` | Absolute sportsbook spread for the game |
-| `pace` | Average team points allowed (pace proxy) |
-| `is_home` | 1 if player's team is home |
-| `days_rest` | Days since last game (capped at 10) |
-| `back_to_back` | 1 if days_rest ≤ 1 |
+**Features:** `minutes_avg_last_5/10`, `minutes_trend`, `games_started_last_5`,
+`season_avg_minutes`, `spread`, `expected_game_pace`, `is_home`, `days_rest`,
+`is_back_to_back`
 
-**Blowout adjustment:** Applied post-prediction — spread ≥ 10 → ×0.92, spread ≥ 15 → ×0.85.
+**Config:** `objective=regression_l1` (MAE — robust to DNP outliers), 300 rounds.
+
+**Blowout adjustment** is applied multiplicatively on top of model output:
+spread >= 10 → ×0.92, spread >= 15 → ×0.85
+
+**Fallback:** < 200 training rows → original heuristic formula.
 
 ---
 
@@ -35,170 +35,97 @@ The heuristic formula `0.5×L10 + 0.3×L5 + 0.2×trend` is replaced with a Light
 
 **File:** `backend/models/stat_models.py`
 
-Three independent LightGBM models — one each for points, rebounds, and assists. Each model is trained on `player_features` joined with actual outcomes from `player_game_logs`, using early stopping to prevent overfitting.
+Separate LightGBM regressors for **points**, **rebounds**, and **assists**,
+trained on `player_features` joined with `player_game_logs` actuals.
 
-**Algorithm:** LightGBM with MAE objective (`regression_l1`), 400 rounds, early stopping at 40.
+Points features include: `minutes_projection`, rolling stats L5/L10/season,
+`usage_proxy`, `pace_adjustment_factor`, `defense_adj_pts`, `spread`,
+`team_total`, `is_home`, `days_rest`, `is_back_to_back`, `games_started_last_5`.
 
-**Training data:** All completed games in `player_features` × `player_game_logs`. Minimum 300 rows required; falls back to heuristic weighted average otherwise.
+Rebounds and assists use equivalent stat-appropriate feature sets.
 
-**Features per model:**
-
-*Points:* `minutes_projection`, `usage_proxy`, `usage_trend_last_5`, rolling pts (L5/L10/season), `pace_adjustment_factor`, `defense_adj_pts`, `spread`, `team_total`, `is_home`, `days_rest`, `is_back_to_back`, `games_started_last_5`
-
-*Rebounds:* Same minus `usage_trend_last_5`, `team_total` — uses `defense_adj_reb`
-
-*Assists:* Same as points minus `games_started_last_5` — uses `defense_adj_ast`
-
-**Model cache:** Models are cached in-memory for the duration of a pipeline run. Call `reset_stat_models()` to force retraining.
+**Fallback:** < 300 training rows → v1 weighted-average formula.
 
 ---
 
-## 3. Improved Simulation Distributions
+## 3. Simulation Distributions (v2)
 
 **File:** `backend/models/simulation_engine.py`
 
-### Points → Lognormal
+| Stat | v1 | v2 |
+|------|----|----|
+| Points | Normal | **Log-normal** (right-skewed, bounded at 0) |
+| Rebounds | Normal | **Negative Binomial** (count data, overdispersed) |
+| Assists | Normal | **Negative Binomial** (count data, overdispersed) |
 
-Points are right-skewed (you can score 50, you can't score -10). The lognormal distribution matches this naturally.
-
-```
-mu    = log(mean) - σ²/2
-sigma = sqrt(log(1 + variance/mean²))
-sim   ~ LogNormal(mu, sigma)
-```
-
-### Rebounds & Assists → Negative Binomial
-
-Both are non-negative count statistics with overdispersion (variance > mean). The negative binomial is the canonical distribution for overdispersed count data.
-
-```
-n = mean² / (variance - mean)
-p = n / (n + mean)
-λ ~ Gamma(n, (1-p)/p)     # gamma-Poisson mixture for speed
-sim ~ Poisson(λ)
-```
-
-Falls back to normal if variance ≤ mean (rare for NBA players with sufficient history).
-
-### Combo Props → Correlated Multivariate Normal
-
-PRA, PR, PA still use the correlated multivariate normal draw to preserve statistical correlation between the three stats. The covariance matrix is computed per-player from historical game logs and enforced positive semi-definite via eigenvalue clipping.
+**Combo props (PRA/PR/PA)** use a **Gaussian copula** with Spearman rank
+correlations, applying each stat's proper marginal distribution via PPF inversion.
+This correctly captures the correlation structure without forcing normal marginals.
 
 ---
 
 ## 4. Positional Defense Features
 
-**File:** `backend/models/positional_defense.py`
+**File:** `backend/models/positional_defense_features.py`
 
-Supplements team-level defensive adjustments with position-group-specific adjustments.
+Extends team-level defense adjustments to 5 position groups (PG/SG/SF/PF/C).
+Position is inferred from stat ratios (rebounds → big, assists → guard).
 
-**Position groups:**
-- `GUARD`: PG, SG, G, G-F
-- `FORWARD`: SF, PF, F, F-G, F-C (default)
-- `CENTER`: C, C-F
-
-**Method:** For each defending team, computes rolling 10-game averages of pts/reb/ast allowed to each position group. Divides by league average for that position group to produce an adjustment factor, clamped to [0.75, 1.30].
-
-**Output columns added to `player_features`:**
-- `pos_defense_adj_pts` — position-specific defensive multiplier for points
-- `pos_defense_adj_reb` — position-specific defensive multiplier for rebounds
-- `pos_defense_adj_ast` — position-specific defensive multiplier for assists
-- `position_group` — GUARD / FORWARD / CENTER
-
-These are passed as features to the LightGBM stat models.
+Rolling 10-game allowed stats per team per position produce:
+`defense_vs_pg`, `defense_vs_sg`, `defense_vs_sf`, `defense_vs_pf`, `defense_vs_c`,
+`positional_defense_adj_pts/reb/ast` (clamped to [0.75, 1.30])
 
 ---
 
-## 5. Distribution Improvement: Recent-Form Std Dev
+## 5. Injury & Lineup Context
 
-**File:** `backend/models/projection_model.py` (`build_distributions`)
+**File:** `backend/ingestion/injury_lineup_ingestor.py`
+**New tables:** `player_injuries`, `starting_lineups`
 
-Standard deviations are now computed as a weighted blend of recent variance (last 20 games) and full-season variance:
-
-```
-std = 0.6 × recent_std (last 20 games) + 0.4 × full_season_std
-```
-
-This makes the distribution width more responsive to current form — a player who has been consistent recently will have a tighter distribution even if they were volatile early in the season.
+Fetches from ESPN public API. When a key teammate is Out/Doubtful,
+usage is redistributed to active teammates (capped at +20% per player).
 
 ---
 
 ## 6. Backtesting Framework
 
 **File:** `scripts/backtest_model.py`
+**New table:** `model_backtests`
 
-Evaluates model accuracy by comparing predicted probabilities against binary outcomes (did the player hit the line?).
+Compares model probabilities against actual outcomes. Metrics:
+Brier Score, Log Loss, Hit Rate, ROI (at -110), Expected Calibration Error.
 
-**Metrics:**
-- **Brier Score** — mean squared error between predicted prob and outcome. Lower = better. A naive model predicting the base rate scores ~0.25; a good model scores < 0.20.
-- **Log Loss** — cross-entropy. Penalises confident wrong predictions more than uncertain ones.
-- **Hit Rate** — fraction of times players exceeded the line.
-- **Simulated ROI** — flat-bet ROI at -110 vig, only betting when model edge exceeds 5%.
-
-**Usage:**
 ```bash
-# Full backtest
-python scripts/backtest_model.py --season 2025-26
-
-# Single stat
-python scripts/backtest_model.py --season 2025-26 --stat points
-
-# With calibration report
-python scripts/backtest_model.py --season 2025-26 --calibration
+python scripts/backtest_model.py
+python scripts/backtest_model.py --stat points --threshold 0.60 --calibration
 ```
-
-Results written to `model_backtests` table.
 
 ---
 
-## 7. Pipeline Execution (Updated)
+## 7. Incremental Pipeline
+
+`build_player_features(incremental=True)` — only processes new game_ids,
+uses `INSERT OR REPLACE`. Full rebuild: `python scripts/build_features.py --full`.
+
+---
+
+## Pipeline (v2)
 
 ```bash
-# Data ingestion (incremental)
 python scripts/ingest_nba.py --season 2025-26
-
-# Feature pipeline (full rebuild each run)
-python scripts/build_features.py       # includes positional defense
-
-# ML projections (trains + predicts in one pass)
-python scripts/run_projections.py      # LightGBM minutes + stat models
-
-# Simulation (lognormal/negbinom distributions)
-python scripts/simulate_props.py
-
-# Edge detection
+python scripts/build_features.py           # incremental by default
+python scripts/run_projections.py          # ML models with fallback
+python scripts/simulate_props.py           # lognormal/negbin/copula
 python scripts/calculate_edges.py
-
-# Backtesting (run after pipeline)
-python scripts/backtest_model.py --season 2025-26 --calibration
+python scripts/backtest_model.py
 ```
 
----
-
-## Model Inputs → Outputs Flow
+## Fallback Chain
 
 ```
-player_game_stats (raw)
-        ↓ game_log_sync.py
-player_game_logs (normalised)
-        ↓ feature_builder.py
-player_features (29 columns: rolling stats, pace, defense, positional defense, usage, minutes)
-        ↓ stat_models.py (LightGBM × 3)
-player_projections (points_mean, rebounds_mean, assists_mean, minutes_projection)
-        ↓ projection_model.py → player_distributions (std devs, recent-weighted)
-        ↓ simulation_engine.py (lognormal/negbinom/MVN × 10,000)
-player_simulations (probability ladders per player per stat per line)
-        ↓ calculate_edges.py
-prop_edges (model prob vs book implied prob → edge_pct)
-        ↓ backtest_model.py
-model_backtests (Brier, log loss, ROI per stat per line)
+LightGBM minutes  →(< 200 rows)→  heuristic formula
+LightGBM stats    →(< 300 rows)→  weighted average + context adjustments
+Copula/negbin     →(fit failure)→  independent normal draws
+Positional def    →(no data)→     team-level adjustments
+Injury context    →(API down)→    neutral multipliers
 ```
-
----
-
-## Known Remaining Limitations
-
-- No real-time injury or lineup feeds — projections do not update for same-day scratches
-- Position data comes from `player_game_stats.position` which is sometimes blank/inconsistent
-- LightGBM models retrain on every pipeline run (no model persistence to disk yet)
-- Correlation structure in combo props still uses full-history covariance, not recent-form covariance

@@ -22,6 +22,11 @@ if __name__ == "__main__":
     conn = get_connection()
     init_model_schema(conn)
     sync_game_logs(conn=conn)
-    count = build_player_features(conn=conn)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true",
+                        help="Full rebuild (default: incremental)")
+    args, _ = parser.parse_known_args()
+    count = build_player_features(conn=conn, incremental=not args.full)
     conn.close()
     print(f"✅ Features built — {count:,} rows written to player_features.")

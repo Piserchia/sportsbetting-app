@@ -29,10 +29,14 @@ from backend.models.positional_defense import build_positional_defense_features
 logger = logging.getLogger(__name__)
 
 
-def build_player_features(conn=None) -> int:
+def build_player_features(conn=None, incremental: bool = True) -> int:
     """
     Compute all rolling + context features for every player/game combination
-    and write to player_features. Clears and rebuilds the table each run.
+    and write to player_features.
+
+    Args:
+        incremental: If True, only process game_ids not already in player_features.
+                     If False, clears and rebuilds the full table.
 
     Returns number of rows written.
     """
@@ -55,6 +59,24 @@ def build_player_features(conn=None) -> int:
         FROM player_game_logs pgl
         ORDER BY pgl.player_id, pgl.game_date ASC
     """).df()
+
+    # Incremental: skip game_ids already in player_features
+    if incremental:
+        try:
+            existing = conn.execute(
+                "SELECT DISTINCT game_id FROM player_features"
+            ).df()["game_id"].tolist()
+            if existing:
+                logs = logs[~logs["game_id"].isin(existing)]
+                logger.info(f"  Incremental mode: {len(logs)} new game-log rows to process "
+                            f"({len(existing)} game_ids already built)")
+                if logs.empty:
+                    logger.info("  All games already in player_features — nothing to do.")
+                    if close:
+                        conn.close()
+                    return 0
+        except Exception:
+            pass  # table may not exist yet — full build
 
     if logs.empty:
         logger.warning("No player_game_logs found. Run ingest_nba first.")
@@ -251,8 +273,11 @@ def build_player_features(conn=None) -> int:
     ]
     features = features[[c for c in expected_cols if c in features.columns]]
 
-    conn.execute("DELETE FROM player_features")
-    conn.execute("INSERT INTO player_features SELECT * FROM features")
+    if incremental:
+        conn.execute("INSERT OR REPLACE INTO player_features SELECT * FROM features")
+    else:
+        conn.execute("DELETE FROM player_features")
+        conn.execute("INSERT INTO player_features SELECT * FROM features")
 
     n = len(features)
     logger.info(f"  → {n} feature rows written to player_features.")
