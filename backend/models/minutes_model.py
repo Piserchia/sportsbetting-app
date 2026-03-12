@@ -1,14 +1,14 @@
 """
 models/minutes_model.py
-Improved minutes projection using rolling averages, trend, and blowout risk.
+LightGBM-trained minutes projection model.
 
-Formula:
-    minutes_projection = 0.5 * last_10 + 0.3 * last_5 + 0.2 * trend_adjustment
-    trend_adjustment   = last_10_avg + (minutes_trend * 2)
+Replaces the heuristic formula with a trained regression model that learns
+optimal weights from historical data.
 
-Blowout risk (from sportsbook spreads):
-    spread >= 10 → multiply by 0.92
-    spread >= 15 → multiply by 0.85
+Features:
+    rolling_minutes_last_5, rolling_minutes_last_10
+    games_started_last_5, minutes_trend
+    spread, pace, home_vs_away, days_rest, back_to_back
 
 Outputs:
     minutes_avg_last_5, minutes_avg_last_10, minutes_trend,
@@ -17,24 +17,28 @@ Outputs:
 """
 
 import logging
+import warnings
 import numpy as np
 import pandas as pd
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+try:
+    import lightgbm as lgb
+    HAS_LGB = True
+except ImportError:
+    HAS_LGB = False
 
 from backend.db.connection import get_connection
 
 logger = logging.getLogger(__name__)
 
-# Blowout thresholds
-BLOWOUT_MILD   = 10.0   # spread >= this → 0.92 multiplier
-BLOWOUT_HEAVY  = 15.0   # spread >= this → 0.85 multiplier
+BLOWOUT_MILD   = 10.0
+BLOWOUT_HEAVY  = 15.0
+MIN_TRAIN_ROWS = 200
 
 
 def rolling_linear_slope(series: pd.Series, window: int = 10) -> pd.Series:
-    """
-    Compute the linear regression slope over a rolling window.
-    Positive slope = player trending toward more minutes.
-    Returns a Series of the same length as the input.
-    """
     slopes = []
     values = series.values
     for i in range(len(values)):
@@ -49,102 +53,178 @@ def rolling_linear_slope(series: pd.Series, window: int = 10) -> pd.Series:
     return pd.Series(slopes, index=series.index)
 
 
-def get_blowout_spreads(conn) -> dict:
-    """
-    Returns a dict of {game_id: abs_spread} for upcoming/scheduled games
-    where spread data is available from the odds table.
-    Uses the average spread across all books for a game.
-    """
+def _heuristic_projection(l10: float, l5: float, slope: float) -> float:
+    trend_adj = l10 + (slope * 2)
+    return max((0.5 * l10) + (0.3 * l5) + (0.2 * trend_adj), 0.0)
+
+
+def _get_context_data(conn) -> tuple:
+    spreads = {}
+    paces = {}
+    home_games = {}
+
     try:
-        spreads = conn.execute("""
+        rows = conn.execute("""
             SELECT game_id, AVG(ABS(home_point)) AS spread
-            FROM odds
-            WHERE market = 'spreads'
-            AND home_point IS NOT NULL
+            FROM odds WHERE market = 'spreads' AND home_point IS NOT NULL
             GROUP BY game_id
-        """).df()
-        if spreads.empty:
-            return {}
-        return dict(zip(spreads["game_id"], spreads["spread"]))
-    except Exception as e:
-        logger.warning(f"Could not load spread data for blowout model: {e}")
-        return {}
+        """).fetchall()
+        spreads = {r[0]: float(r[1]) for r in rows}
+    except Exception:
+        pass
+
+    try:
+        rows = conn.execute("""
+            SELECT game_id, AVG(pts) AS avg_pts
+            FROM team_game_stats GROUP BY game_id
+        """).fetchall()
+        paces = {r[0]: float(r[1]) if r[1] else 110.0 for r in rows}
+    except Exception:
+        pass
+
+    try:
+        rows = conn.execute("SELECT game_id, home_team_abbr FROM games").fetchall()
+        home_games = {r[0]: r[1] for r in rows}
+    except Exception:
+        pass
+
+    return spreads, paces, home_games
+
+
+def _build_training_data(logs_df, spreads, paces, home_games):
+    records = []
+    for player_id, group in logs_df.groupby("player_id"):
+        group = group.sort_values("game_date").reset_index(drop=True)
+        mins = group["minutes"].fillna(0)
+
+        avg_l5  = mins.shift(1).rolling(5,  min_periods=1).mean().fillna(0)
+        avg_l10 = mins.shift(1).rolling(10, min_periods=1).mean().fillna(0)
+        trend   = rolling_linear_slope(mins.shift(1).fillna(0), window=10)
+        started = (mins.shift(1).fillna(0) >= 28).astype(int)
+        starts_l5 = started.rolling(5, min_periods=1).sum()
+        dates = pd.to_datetime(group["game_date"])
+        days_rest = dates.diff().dt.days.fillna(3).clip(0, 10)
+
+        for i in range(1, len(group)):
+            row = group.iloc[i]
+            actual = float(mins.iloc[i])
+            if actual <= 0:
+                continue
+            game_id = row["game_id"]
+            team = row.get("team", "")
+            home_abbr = home_games.get(game_id, "")
+            records.append({
+                "minutes_l5":    float(avg_l5.iloc[i]),
+                "minutes_l10":   float(avg_l10.iloc[i]),
+                "minutes_trend": float(trend.iloc[i]),
+                "games_started": float(starts_l5.iloc[i]),
+                "spread":        spreads.get(game_id, 5.0),
+                "pace":          paces.get(game_id, 110.0),
+                "is_home":       1 if team and team == home_abbr else 0,
+                "days_rest":     float(days_rest.iloc[i]),
+                "back_to_back":  1 if float(days_rest.iloc[i]) <= 1 else 0,
+                "target":        actual,
+            })
+    return pd.DataFrame(records)
+
+
+def _train_lgb_model(train_df):
+    features = ["minutes_l5", "minutes_l10", "minutes_trend",
+                "games_started", "spread", "pace", "is_home",
+                "days_rest", "back_to_back"]
+    X = train_df[features].fillna(0)
+    y = train_df["target"]
+    params = {
+        "objective": "regression", "metric": "rmse",
+        "num_leaves": 31, "learning_rate": 0.05,
+        "feature_fraction": 0.8, "bagging_fraction": 0.8,
+        "bagging_freq": 5, "n_estimators": 300,
+        "min_child_samples": 10, "verbose": -1,
+    }
+    model = lgb.LGBMRegressor(**params)
+    model.fit(X, y)
+    return model, features
 
 
 def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
-    """
-    Given a player_game_logs DataFrame (sorted ascending by game_date per player),
-    compute improved minutes features and projections.
-
-    Args:
-        logs_df: Must contain columns: game_id, player_id, game_date, minutes
-        conn:    DuckDB connection (used to fetch spread data for blowout risk)
-
-    Returns DataFrame with columns:
-        game_id, player_id,
-        minutes_avg_last_5, minutes_avg_last_10, minutes_trend,
-        games_started_last_5, minutes_projection,
-        blowout_risk, blowout_adjustment_factor
-    """
     close = conn is None
-    conn = conn or get_connection()
-
+    if close:
+        conn = get_connection()
     try:
-        blowout_spreads = get_blowout_spreads(conn)
+        spreads, paces, home_games = _get_context_data(conn)
     finally:
         if close:
             conn.close()
 
-    records = []
+    model = None
+    feature_names = None
 
+    if HAS_LGB:
+        try:
+            train_df = _build_training_data(logs_df, spreads, paces, home_games)
+            if len(train_df) >= MIN_TRAIN_ROWS:
+                model, feature_names = _train_lgb_model(train_df)
+                logger.info(f"  LightGBM minutes model trained on {len(train_df):,} samples.")
+            else:
+                logger.info(f"  Only {len(train_df)} training rows — using heuristic minutes model.")
+        except Exception as e:
+            logger.warning(f"  LightGBM minutes training failed: {e} — using heuristic.")
+            model = None
+
+    records = []
     for player_id, group in logs_df.groupby("player_id"):
         group = group.sort_values("game_date").reset_index(drop=True)
         mins  = group["minutes"].fillna(0)
 
-        avg_last_5  = mins.rolling(5,  min_periods=1).mean()
-        avg_last_10 = mins.rolling(10, min_periods=1).mean()
-        trend       = rolling_linear_slope(mins, window=10)
-
-        # games_started proxy: minutes >= 28 treated as "started"
-        started     = (mins >= 28).astype(int)
-        starts_l5   = started.rolling(5, min_periods=1).sum()
+        avg_l5  = mins.rolling(5,  min_periods=1).mean()
+        avg_l10 = mins.rolling(10, min_periods=1).mean()
+        trend   = rolling_linear_slope(mins, window=10)
+        started = (mins >= 28).astype(int)
+        starts_l5 = started.rolling(5, min_periods=1).sum()
+        dates = pd.to_datetime(group["game_date"])
+        days_rest = dates.diff().dt.days.fillna(3).clip(0, 10)
 
         for i, row in group.iterrows():
-            l10   = float(avg_last_10.iloc[i])
-            l5    = float(avg_last_5.iloc[i])
-            slope = float(trend.iloc[i])
-
-            # Trend adjustment: anchor to L10, push in slope direction
-            trend_adj = l10 + (slope * 2)
-
-            # Weighted projection
-            proj = (0.5 * l10) + (0.3 * l5) + (0.2 * trend_adj)
-            proj = max(proj, 0.0)
-
-            # Blowout risk
+            l10 = float(avg_l10.iloc[i])
+            l5  = float(avg_l5.iloc[i])
+            slp = float(trend.iloc[i])
             game_id = row["game_id"]
-            spread  = blowout_spreads.get(game_id, 0.0)
-            if spread >= BLOWOUT_HEAVY:
-                blowout_factor = 0.85
-                blowout_risk   = "HIGH"
-            elif spread >= BLOWOUT_MILD:
-                blowout_factor = 0.92
-                blowout_risk   = "MODERATE"
-            else:
-                blowout_factor = 1.0
-                blowout_risk   = "NONE"
+            spread  = spreads.get(game_id, 5.0)
+            pace    = paces.get(game_id, 110.0)
+            team    = row.get("team", "")
+            home_abbr = home_games.get(game_id, "")
+            is_home = 1 if team and team == home_abbr else 0
+            rest = float(days_rest.iloc[i])
+            b2b  = 1 if rest <= 1 else 0
 
-            proj_adjusted = proj * blowout_factor
+            if model is not None:
+                feats = pd.DataFrame([{
+                    "minutes_l5": l5, "minutes_l10": l10, "minutes_trend": slp,
+                    "games_started": float(starts_l5.iloc[i]),
+                    "spread": spread, "pace": pace, "is_home": is_home,
+                    "days_rest": rest, "back_to_back": b2b,
+                }])
+                proj = float(model.predict(feats[feature_names])[0])
+                proj = max(proj, 0.0)
+            else:
+                proj = _heuristic_projection(l10, l5, slp)
+
+            if spread >= BLOWOUT_HEAVY:
+                blowout_factor, blowout_risk = 0.85, "HIGH"
+            elif spread >= BLOWOUT_MILD:
+                blowout_factor, blowout_risk = 0.92, "MODERATE"
+            else:
+                blowout_factor, blowout_risk = 1.0, "NONE"
 
             records.append({
-                "game_id":                  game_id,
-                "player_id":                str(player_id),
-                "minutes_avg_last_5":       round(l5, 4),
-                "minutes_avg_last_10":      round(l10, 4),
-                "minutes_trend":            round(slope, 4),
-                "games_started_last_5":     int(starts_l5.iloc[i]),
-                "minutes_projection":       round(proj_adjusted, 4),
-                "blowout_risk":             blowout_risk,
+                "game_id":                   game_id,
+                "player_id":                 str(player_id),
+                "minutes_avg_last_5":        round(l5,  4),
+                "minutes_avg_last_10":       round(l10, 4),
+                "minutes_trend":             round(slp, 4),
+                "games_started_last_5":      int(starts_l5.iloc[i]),
+                "minutes_projection":        round(proj * blowout_factor, 4),
+                "blowout_risk":              blowout_risk,
                 "blowout_adjustment_factor": round(blowout_factor, 4),
             })
 

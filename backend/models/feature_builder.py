@@ -24,6 +24,7 @@ from backend.models.pace_features    import build_pace_features
 from backend.models.defense_features import build_defense_features
 from backend.models.minutes_model    import build_minutes_features
 from backend.models.usage_features   import build_usage_features
+from backend.models.positional_defense import build_positional_defense_features
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +140,15 @@ def build_player_features(conn=None) -> int:
         logger.warning(f"  Usage features failed: {e} — skipping")
         usage_df = pd.DataFrame()
 
+    # ── 6b. Positional defense features ─────────────────────────────────
+    logger.info("  Computing positional defense features...")
+    try:
+        pos_def_df = build_positional_defense_features(conn=conn)
+        logger.info(f"  → {len(pos_def_df)} positional defense rows")
+    except Exception as e:
+        logger.warning(f"  Positional defense features failed: {e} — skipping")
+        pos_def_df = pd.DataFrame()
+
     # ── 7. Join all feature groups ───────────────────────────────────────────
     logger.info("  Joining all feature groups...")
     features = base_df
@@ -206,8 +216,23 @@ def build_player_features(conn=None) -> int:
         else:
             features[col] = features[col].fillna(default)
 
+    if not pos_def_df.empty:
+        # pos_def_df uses player_id from box scores (int-cast string); align types
+        pos_def_df["player_id"] = pos_def_df["player_id"].astype(str)
+        merge_cols = [c for c in pos_def_df.columns if c not in ("game_id", "player_id") or c in key]
+        features = features.merge(pos_def_df[key + [c for c in pos_def_df.columns if c not in key]], on=key, how="left")
+    for col, default in [
+        ("pos_defense_adj_pts", 1.0),
+        ("pos_defense_adj_reb", 1.0),
+        ("pos_defense_adj_ast", 1.0),
+        ("position_group",      "FORWARD"),
+    ]:
+        if col not in features.columns:
+            features[col] = default
+        else:
+            features[col] = features[col].fillna(default)
+
     # ── 8. Write to DB ───────────────────────────────────────────────────────
-    # Drop any legacy columns that don't match the new schema
     expected_cols = [
         "game_id", "player_id",
         "points_avg_last_5",  "points_avg_last_10",
@@ -221,6 +246,8 @@ def build_player_features(conn=None) -> int:
         "opponent_points_allowed", "opponent_rebounds_allowed", "opponent_assists_allowed",
         "defense_adj_pts", "defense_adj_reb", "defense_adj_ast",
         "usage_proxy", "usage_trend_last_5",
+        "pos_defense_adj_pts", "pos_defense_adj_reb", "pos_defense_adj_ast",
+        "position_group",
     ]
     features = features[[c for c in expected_cols if c in features.columns]]
 

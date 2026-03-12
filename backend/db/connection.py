@@ -345,6 +345,10 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("usage_proxy",                  "DOUBLE",  "0.2"),
         ("usage_trend_last_5",           "DOUBLE",  "0.0"),
         ("minutes_projection",           "DOUBLE",  "0.0"),
+        ("pos_defense_adj_pts",          "DOUBLE",  "1.0"),
+        ("pos_defense_adj_reb",          "DOUBLE",  "1.0"),
+        ("pos_defense_adj_ast",          "DOUBLE",  "1.0"),
+        ("position_group",               "VARCHAR", "'FORWARD'"),
     ]
     existing_cols = {
         row[0]: row[1] for row in conn.execute(
@@ -365,5 +369,51 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             conn.execute("ALTER TABLE player_features ADD COLUMN blowout_risk VARCHAR DEFAULT 'NONE'")
         except Exception:
             pass
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_injuries (
+            injury_id       TEXT PRIMARY KEY,
+            player_id       TEXT,
+            player_name     TEXT,
+            team_abbr       TEXT,
+            status          TEXT,   -- 'Out', 'Doubtful', 'Questionable', 'Probable'
+            injury_type     TEXT,
+            report_date     DATE,
+            game_id         TEXT,
+            source          TEXT,
+            fetched_at      TIMESTAMP DEFAULT current_timestamp
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS starting_lineups (
+            lineup_id       TEXT PRIMARY KEY,
+            game_id         TEXT,
+            team_id         INTEGER,
+            player_id       TEXT,
+            is_starter      BOOLEAN,
+            position        TEXT,
+            report_date     DATE,
+            source          TEXT,
+            fetched_at      TIMESTAMP DEFAULT current_timestamp
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_backtests (
+            season          TEXT,
+            stat            TEXT,
+            line            DOUBLE,
+            n_samples       INTEGER,
+            hit_rate        DOUBLE,
+            avg_model_prob  DOUBLE,
+            brier_score     DOUBLE,
+            log_loss        DOUBLE,
+            simulated_bets  INTEGER,
+            simulated_roi   DOUBLE,
+            simulated_profit DOUBLE,
+            PRIMARY KEY (season, stat, line)
+        )
+    """)
 
     logger.info("Model schema initialization complete.")
