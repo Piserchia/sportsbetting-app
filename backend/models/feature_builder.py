@@ -54,6 +54,8 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
             pgl.points,
             pgl.rebounds,
             pgl.assists,
+            pgl.steals,
+            pgl.blocks,
             pgl.fg_attempts,
             pgl.free_throw_attempts,
             pgl.turnovers
@@ -98,6 +100,8 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         pts  = player_logs["points"]
         reb  = player_logs["rebounds"]
         ast  = player_logs["assists"]
+        stl  = player_logs["steals"].fillna(0)
+        blk  = player_logs["blocks"].fillna(0)
 
         points_avg_last_5   = pts.rolling(5,  min_periods=1).mean()
         points_avg_last_10  = pts.rolling(10, min_periods=1).mean()
@@ -105,9 +109,15 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         rebounds_avg_last_10 = reb.rolling(10, min_periods=1).mean()
         assists_avg_last_5  = ast.rolling(5,  min_periods=1).mean()
         assists_avg_last_10 = ast.rolling(10, min_periods=1).mean()
+        steals_avg_last_5   = stl.rolling(5,  min_periods=1).mean()
+        steals_avg_last_10  = stl.rolling(10, min_periods=1).mean()
+        blocks_avg_last_5   = blk.rolling(5,  min_periods=1).mean()
+        blocks_avg_last_10  = blk.rolling(10, min_periods=1).mean()
         season_avg_points   = pts.expanding().mean()
         season_avg_rebounds = reb.expanding().mean()
         season_avg_assists  = ast.expanding().mean()
+        season_avg_steals   = stl.expanding().mean()
+        season_avg_blocks   = blk.expanding().mean()
 
         for i, row in player_logs.iterrows():
             stat_records.append({
@@ -119,9 +129,15 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
                 "rebounds_avg_last_10":  round(float(rebounds_avg_last_10.iloc[i]),4),
                 "assists_avg_last_5":    round(float(assists_avg_last_5.iloc[i]),  4),
                 "assists_avg_last_10":   round(float(assists_avg_last_10.iloc[i]), 4),
+                "steals_avg_last_5":     round(float(steals_avg_last_5.iloc[i]),   4),
+                "steals_avg_last_10":    round(float(steals_avg_last_10.iloc[i]),  4),
+                "blocks_avg_last_5":     round(float(blocks_avg_last_5.iloc[i]),   4),
+                "blocks_avg_last_10":    round(float(blocks_avg_last_10.iloc[i]),  4),
                 "season_avg_points":     round(float(season_avg_points.iloc[i]),   4),
                 "season_avg_rebounds":   round(float(season_avg_rebounds.iloc[i]), 4),
                 "season_avg_assists":    round(float(season_avg_assists.iloc[i]),  4),
+                "season_avg_steals":     round(float(season_avg_steals.iloc[i]),   4),
+                "season_avg_blocks":     round(float(season_avg_blocks.iloc[i]),   4),
             })
 
     base_df = pd.DataFrame(stat_records)
@@ -225,6 +241,10 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         ("defense_adj_pts",          1.0),
         ("defense_adj_reb",          1.0),
         ("defense_adj_ast",          1.0),
+        ("opponent_steals_allowed",  8.0),
+        ("opponent_blocks_allowed",  5.0),
+        ("defense_adj_stl",          1.0),
+        ("defense_adj_blk",          1.0),
     ]:
         if col not in features.columns:
             features[col] = default
@@ -285,13 +305,18 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         "points_avg_last_5",  "points_avg_last_10",
         "rebounds_avg_last_5", "rebounds_avg_last_10",
         "assists_avg_last_5",  "assists_avg_last_10",
+        "steals_avg_last_5",   "steals_avg_last_10",
+        "blocks_avg_last_5",   "blocks_avg_last_10",
         "season_avg_points", "season_avg_rebounds", "season_avg_assists",
+        "season_avg_steals", "season_avg_blocks",
         "minutes_avg_last_5", "minutes_avg_last_10", "minutes_trend",
         "games_started_last_5", "minutes_projection",
         "blowout_risk", "blowout_adjustment_factor",
         "team_pace", "opponent_pace", "expected_game_pace", "pace_adjustment_factor",
         "opponent_points_allowed", "opponent_rebounds_allowed", "opponent_assists_allowed",
         "defense_adj_pts", "defense_adj_reb", "defense_adj_ast",
+        "opponent_steals_allowed", "opponent_blocks_allowed",
+        "defense_adj_stl", "defense_adj_blk",
         "usage_proxy", "usage_trend_last_5",
         "positional_defense_adj_pts", "positional_defense_adj_reb", "positional_defense_adj_ast",
         "defense_vs_pg", "defense_vs_sg", "defense_vs_sf", "defense_vs_pf", "defense_vs_c",
@@ -300,10 +325,10 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
     features = features[[c for c in expected_cols if c in features.columns]]
 
     if incremental:
-        conn.execute("INSERT OR REPLACE INTO player_features SELECT * FROM features")
+        conn.execute("INSERT OR REPLACE INTO player_features BY NAME SELECT * FROM features")
     else:
         conn.execute("DELETE FROM player_features")
-        conn.execute("INSERT INTO player_features SELECT * FROM features")
+        conn.execute("INSERT INTO player_features BY NAME SELECT * FROM features")
 
     n = len(features)
     logger.info(f"  → {n} feature rows written to player_features.")

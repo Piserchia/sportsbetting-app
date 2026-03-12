@@ -50,7 +50,9 @@ def build_defense_features(conn=None) -> pd.DataFrame:
                 pgs.team_id AS scoring_team_id,
                 SUM(pgs.pts) AS pts_allowed,
                 SUM(pgs.reb) AS reb_allowed,
-                SUM(pgs.ast) AS ast_allowed
+                SUM(pgs.ast) AS ast_allowed,
+                SUM(pgs.stl) AS stl_allowed,
+                SUM(pgs.blk) AS blk_allowed
             FROM player_game_stats pgs
             JOIN games g ON pgs.game_id = g.game_id
             WHERE pgs.pts IS NOT NULL
@@ -66,12 +68,15 @@ def build_defense_features(conn=None) -> pd.DataFrame:
             "pts": float(allowed["pts_allowed"].mean()),
             "reb": float(allowed["reb_allowed"].mean()),
             "ast": float(allowed["ast_allowed"].mean()),
+            "stl": float(allowed["stl_allowed"].mean()) if "stl_allowed" in allowed.columns else 8.0,
+            "blk": float(allowed["blk_allowed"].mean()) if "blk_allowed" in allowed.columns else 5.0,
         }
         # Clamp to avoid division by zero
         league_avg = {k: max(v, 1.0) for k, v in league_avg.items()}
         logger.info(
             f"  League avg allowed — pts: {league_avg['pts']:.1f}, "
-            f"reb: {league_avg['reb']:.1f}, ast: {league_avg['ast']:.1f}"
+            f"reb: {league_avg['reb']:.1f}, ast: {league_avg['ast']:.1f}, "
+            f"stl: {league_avg['stl']:.1f}, blk: {league_avg['blk']:.1f}"
         )
 
         # Rolling 10-game defensive averages per defending team
@@ -81,11 +86,15 @@ def build_defense_features(conn=None) -> pd.DataFrame:
             roll_pts = group["pts_allowed"].rolling(10, min_periods=1).mean()
             roll_reb = group["reb_allowed"].rolling(10, min_periods=1).mean()
             roll_ast = group["ast_allowed"].rolling(10, min_periods=1).mean()
+            roll_stl = group["stl_allowed"].rolling(10, min_periods=1).mean() if "stl_allowed" in group.columns else None
+            roll_blk = group["blk_allowed"].rolling(10, min_periods=1).mean() if "blk_allowed" in group.columns else None
             for i, row in group.iterrows():
                 def_records[(row["game_id"], int(def_team_id))] = {
                     "opp_pts_allowed": round(float(roll_pts.iloc[i]), 4),
                     "opp_reb_allowed": round(float(roll_reb.iloc[i]), 4),
                     "opp_ast_allowed": round(float(roll_ast.iloc[i]), 4),
+                    "opp_stl_allowed": round(float(roll_stl.iloc[i]), 4) if roll_stl is not None else league_avg["stl"],
+                    "opp_blk_allowed": round(float(roll_blk.iloc[i]), 4) if roll_blk is not None else league_avg["blk"],
                 }
 
         # Map to players: for each player find their opponent (defending team)
@@ -121,6 +130,8 @@ def build_defense_features(conn=None) -> pd.DataFrame:
                     "opp_pts_allowed": league_avg["pts"],
                     "opp_reb_allowed": league_avg["reb"],
                     "opp_ast_allowed": league_avg["ast"],
+                    "opp_stl_allowed": league_avg["stl"],
+                    "opp_blk_allowed": league_avg["blk"],
                 }
             )
 
@@ -130,16 +141,22 @@ def build_defense_features(conn=None) -> pd.DataFrame:
             def_adj_pts = def_stats["opp_pts_allowed"] / league_avg["pts"]
             def_adj_reb = def_stats["opp_reb_allowed"] / league_avg["reb"]
             def_adj_ast = def_stats["opp_ast_allowed"] / league_avg["ast"]
+            def_adj_stl = def_stats["opp_stl_allowed"] / league_avg["stl"]
+            def_adj_blk = def_stats["opp_blk_allowed"] / league_avg["blk"]
 
             records.append({
-                "game_id":                  game_id,
-                "player_id":                player_id,
-                "opponent_points_allowed":  def_stats["opp_pts_allowed"],
+                "game_id":                   game_id,
+                "player_id":                 player_id,
+                "opponent_points_allowed":   def_stats["opp_pts_allowed"],
                 "opponent_rebounds_allowed": def_stats["opp_reb_allowed"],
-                "opponent_assists_allowed": def_stats["opp_ast_allowed"],
-                "defense_adj_pts":          round(def_adj_pts, 4),
-                "defense_adj_reb":          round(def_adj_reb, 4),
-                "defense_adj_ast":          round(def_adj_ast, 4),
+                "opponent_assists_allowed":  def_stats["opp_ast_allowed"],
+                "opponent_steals_allowed":   def_stats["opp_stl_allowed"],
+                "opponent_blocks_allowed":   def_stats["opp_blk_allowed"],
+                "defense_adj_pts":           round(def_adj_pts, 4),
+                "defense_adj_reb":           round(def_adj_reb, 4),
+                "defense_adj_ast":           round(def_adj_ast, 4),
+                "defense_adj_stl":           round(def_adj_stl, 4),
+                "defense_adj_blk":           round(def_adj_blk, 4),
             })
 
         return pd.DataFrame(records)

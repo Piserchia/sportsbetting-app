@@ -196,6 +196,13 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             season_avg_points           DOUBLE,
             season_avg_rebounds         DOUBLE,
             season_avg_assists          DOUBLE,
+            -- Steals / Blocks rolling averages
+            steals_avg_last_5           DOUBLE,
+            steals_avg_last_10          DOUBLE,
+            blocks_avg_last_5           DOUBLE,
+            blocks_avg_last_10          DOUBLE,
+            season_avg_steals           DOUBLE,
+            season_avg_blocks           DOUBLE,
             -- Improved minutes model
             minutes_avg_last_5          DOUBLE,
             minutes_avg_last_10         DOUBLE,
@@ -216,6 +223,11 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             defense_adj_pts             DOUBLE,
             defense_adj_reb             DOUBLE,
             defense_adj_ast             DOUBLE,
+            -- Steals / Blocks defensive context
+            opponent_steals_allowed     DOUBLE,
+            opponent_blocks_allowed     DOUBLE,
+            defense_adj_stl             DOUBLE,
+            defense_adj_blk             DOUBLE,
             -- Usage
             usage_proxy                 DOUBLE,
             usage_trend_last_5          DOUBLE,
@@ -230,6 +242,8 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             points_mean         DOUBLE,
             rebounds_mean       DOUBLE,
             assists_mean        DOUBLE,
+            steals_mean         DOUBLE,
+            blocks_mean         DOUBLE,
             minutes_projection  DOUBLE,
             PRIMARY KEY (game_id, player_id)
         )
@@ -299,6 +313,12 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             season_avg_points           DOUBLE,
             season_avg_rebounds         DOUBLE,
             season_avg_assists          DOUBLE,
+            steals_avg_last_5           DOUBLE,
+            steals_avg_last_10          DOUBLE,
+            blocks_avg_last_5           DOUBLE,
+            blocks_avg_last_10          DOUBLE,
+            season_avg_steals           DOUBLE,
+            season_avg_blocks           DOUBLE,
             minutes_avg_last_5          DOUBLE,
             minutes_avg_last_10         DOUBLE,
             minutes_trend               DOUBLE,
@@ -316,6 +336,10 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             defense_adj_pts             DOUBLE,
             defense_adj_reb             DOUBLE,
             defense_adj_ast             DOUBLE,
+            opponent_steals_allowed     DOUBLE,
+            opponent_blocks_allowed     DOUBLE,
+            defense_adj_stl             DOUBLE,
+            defense_adj_blk             DOUBLE,
             usage_proxy                 DOUBLE,
             usage_trend_last_5          DOUBLE,
             PRIMARY KEY (game_id, player_id)
@@ -354,6 +378,16 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("defense_vs_pf",                 "DOUBLE",  "8.0"),
         ("defense_vs_c",                  "DOUBLE",  "8.0"),
         ("player_position",               "VARCHAR", "'SF'"),
+        ("steals_avg_last_5",             "DOUBLE",  "0.0"),
+        ("steals_avg_last_10",            "DOUBLE",  "0.0"),
+        ("blocks_avg_last_5",             "DOUBLE",  "0.0"),
+        ("blocks_avg_last_10",            "DOUBLE",  "0.0"),
+        ("season_avg_steals",             "DOUBLE",  "0.0"),
+        ("season_avg_blocks",             "DOUBLE",  "0.0"),
+        ("opponent_steals_allowed",       "DOUBLE",  "8.0"),
+        ("opponent_blocks_allowed",       "DOUBLE",  "5.0"),
+        ("defense_adj_stl",               "DOUBLE",  "1.0"),
+        ("defense_adj_blk",               "DOUBLE",  "1.0"),
     ]
     existing_cols = {
         row[0]: row[1] for row in conn.execute(
@@ -366,6 +400,19 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
                 conn.execute(f"ALTER TABLE player_features ADD COLUMN {col_name} {col_type} DEFAULT {col_default}")
             except Exception:
                 pass  # column may already exist in some form
+
+    # Add steals_mean / blocks_mean to player_projections if missing
+    try:
+        proj_cols = {
+            row[0] for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'player_projections'"
+            ).fetchall()
+        }
+        for col_name in ["steals_mean", "blocks_mean"]:
+            if col_name not in proj_cols:
+                conn.execute(f"ALTER TABLE player_projections ADD COLUMN {col_name} DOUBLE DEFAULT 0.0")
+    except Exception:
+        pass
 
     # Fix blowout_risk if it was created as DOUBLE instead of VARCHAR
     if existing_cols.get("blowout_risk", "").upper() in ("DOUBLE", "FLOAT", "REAL"):

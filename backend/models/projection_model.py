@@ -81,13 +81,29 @@ def generate_projections(conn=None) -> int:
     usage       = features.get("usage_proxy", pd.Series(0.2, index=features.index)).fillna(0.2)
     usage_adj   = (usage / 0.20).clip(USAGE_ADJ_MIN, USAGE_ADJ_MAX)
 
+    def_adj_stl = features.get("defense_adj_stl", pd.Series(1.0, index=features.index)).fillna(1.0).clip(DEF_ADJ_MIN, DEF_ADJ_MAX)
+    def_adj_blk = features.get("defense_adj_blk", pd.Series(1.0, index=features.index)).fillna(1.0).clip(DEF_ADJ_MIN, DEF_ADJ_MAX)
+
+    base_stl = (
+        0.5 * features.get("steals_avg_last_10", pd.Series(0.0, index=features.index)) +
+        0.3 * features.get("steals_avg_last_5",  pd.Series(0.0, index=features.index)) +
+        0.2 * features.get("season_avg_steals",  pd.Series(0.0, index=features.index))
+    )
+    base_blk = (
+        0.5 * features.get("blocks_avg_last_10", pd.Series(0.0, index=features.index)) +
+        0.3 * features.get("blocks_avg_last_5",  pd.Series(0.0, index=features.index)) +
+        0.2 * features.get("season_avg_blocks",  pd.Series(0.0, index=features.index))
+    )
+
     features["points_mean"]        = (features["base_pts"] * pace_adj * def_adj_pts * usage_adj).clip(lower=0).round(4)
     features["rebounds_mean"]      = (features["base_reb"] * pace_adj * def_adj_reb).clip(lower=0).round(4)
     features["assists_mean"]       = (features["base_ast"] * pace_adj * def_adj_ast).clip(lower=0).round(4)
+    features["steals_mean"]        = (base_stl * pace_adj * def_adj_stl).clip(lower=0).round(4)
+    features["blocks_mean"]        = (base_blk * pace_adj * def_adj_blk).clip(lower=0).round(4)
     features["minutes_projection"] = features.get("minutes_projection", features.get("minutes_avg_last_10", 0.0)).fillna(0.0).round(4)
 
     projections = features[["game_id", "player_id", "points_mean", "rebounds_mean",
-                             "assists_mean", "minutes_projection"]].copy()
+                             "assists_mean", "steals_mean", "blocks_mean", "minutes_projection"]].copy()
     conn.execute("DELETE FROM player_projections")
     conn.execute("INSERT INTO player_projections SELECT * FROM projections")
     logger.info(f"  → {len(projections)} rows written to player_projections (heuristic).")
@@ -109,7 +125,7 @@ def build_distributions(conn=None) -> int:
     conn = conn or get_connection()
 
     logs = conn.execute("""
-        SELECT player_id, game_id, game_date, points, rebounds, assists
+        SELECT player_id, game_id, game_date, points, rebounds, assists, steals, blocks
         FROM player_game_logs
         ORDER BY player_id, game_date ASC
     """).df()
@@ -128,7 +144,7 @@ def build_distributions(conn=None) -> int:
         ) t WHERE rn = 1
     """).df()
 
-    stats = ["points", "rebounds", "assists"]
+    stats = ["points", "rebounds", "assists", "steals", "blocks"]
     records = []
     MIN_STD = 1.5
 

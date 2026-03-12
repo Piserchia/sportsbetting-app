@@ -379,17 +379,29 @@ export default function PropDashboard() {
                   {profile.next_game_date && <span style={{ color: T.textFaint }}>· {formatDate(profile.next_game_date)}</span>}
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                <StatBadge label="L10 Avg"    value={profile.l10_avg_pts}        sub="pts" />
-                <StatBadge label="L5 Avg"     value={profile.l5_avg_pts}         sub="pts" />
-                <StatBadge label="Season Avg" value={profile.season_avg_pts}     sub="pts" />
-                <StatBadge label="Min Proj"   value={profile.minutes_projection} sub="min" />
-              </div>
+              {/* Dynamic badges based on active stat */}
+              {(() => {
+                const statKey = activeStat;
+                const short = { points: "pts", rebounds: "reb", assists: "ast", steals: "stl", blocks: "blk" }[statKey] || statKey.slice(0, 3);
+                const l10Map = { points: profile.l10_avg_pts, rebounds: profile.l10_avg_reb, assists: profile.l10_avg_ast, steals: profile.l10_avg_stl, blocks: profile.l10_avg_blk };
+                const l5Map  = { points: profile.l5_avg_pts,  rebounds: profile.l5_avg_reb,  assists: profile.l5_avg_ast,  steals: profile.l5_avg_stl,  blocks: profile.l5_avg_blk  };
+                const seaMap = { points: profile.season_avg_pts, rebounds: profile.season_avg_reb, assists: profile.season_avg_ast, steals: profile.season_avg_stl, blocks: profile.season_avg_blk };
+                const projMap = { points: profile.points_projection, rebounds: profile.rebounds_projection, assists: profile.assists_projection, steals: profile.steals_projection, blocks: profile.blocks_projection };
+                return (
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <StatBadge label="L10 Avg"    value={l10Map[statKey]}            sub={short} />
+                    <StatBadge label="L5 Avg"     value={l5Map[statKey]}             sub={short} />
+                    <StatBadge label="Season Avg" value={seaMap[statKey]}            sub={short} />
+                    <StatBadge label="Projection" value={projMap[statKey]}           sub={short} />
+                    <StatBadge label="Min Proj"   value={profile.minutes_projection} sub="min" />
+                  </div>
+                );
+              })()}
             </div>
 
             {/* ── Stat tabs ── */}
             <div style={{ display: "flex", gap: 6, marginBottom: 20 }}>
-              {["points", "rebounds", "assists"].map(s => (
+              {["points", "rebounds", "assists", "steals", "blocks"].map(s => (
                 <button key={s} className="stat-tab" onClick={() => setActiveStat(s)} style={{
                   background: activeStat === s ? T.accent : T.surface,
                   color: activeStat === s ? "#fff" : T.textMid,
@@ -687,7 +699,12 @@ export default function PropDashboard() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {[
                       { label: "Games in sample",    value: profile.games_played },
-                      { label: "Points projection",  value: profile.points_projection ? `${profile.points_projection} pts` : "—" },
+                      { label: `${activeStat.charAt(0).toUpperCase() + activeStat.slice(1)} projection`,
+                        value: (() => {
+                          const m = { points: profile.points_projection, rebounds: profile.rebounds_projection, assists: profile.assists_projection, steals: profile.steals_projection, blocks: profile.blocks_projection };
+                          const s = { points: "pts", rebounds: "reb", assists: "ast", steals: "stl", blocks: "blk" };
+                          return m[activeStat] != null ? `${m[activeStat]} ${s[activeStat]}` : "—";
+                        })() },
                       { label: "Minutes projection", value: profile.minutes_projection ? `${profile.minutes_projection} min` : "—" },
                       { label: "Simulations",        value: "10,000" },
                       { label: "Model version",      value: "v2 — context adjusted" },

@@ -102,6 +102,8 @@ STANDARD_MARKETS = [
     "player-points-over-under",
     "player-rebounds-over-under",
     "player-assists-over-under",
+    "player-steals-over-under",
+    "player-blocks-over-under",
     "player-threes-over-under",
 ]
 
@@ -128,6 +130,10 @@ MARKET_TO_STAT = {
     "player-rebounds-alternate":  "rebounds",
     "player-assists-over-under":  "assists",
     "player-assists-alternate":   "assists",
+    "player-steals-over-under":   "steals",
+    "player-steals-alternate":    "steals",
+    "player-blocks-over-under":   "blocks",
+    "player-blocks-alternate":    "blocks",
     "player-threes-over-under":   "threes",
     "player-threes-alternate":    "threes",
 }

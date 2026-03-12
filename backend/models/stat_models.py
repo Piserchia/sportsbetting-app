@@ -78,6 +78,30 @@ STAT_FEATURES = {
         "is_back_to_back",
         "games_started_last_5",
     ],
+    "steals": [
+        "minutes_projection",
+        "steals_avg_last_5",
+        "steals_avg_last_10",
+        "season_avg_steals",
+        "pace_adjustment_factor",
+        "defense_adj_stl",
+        "is_home",
+        "days_rest",
+        "is_back_to_back",
+        "games_started_last_5",
+    ],
+    "blocks": [
+        "minutes_projection",
+        "blocks_avg_last_5",
+        "blocks_avg_last_10",
+        "season_avg_blocks",
+        "pace_adjustment_factor",
+        "defense_adj_blk",
+        "is_home",
+        "days_rest",
+        "is_back_to_back",
+        "games_started_last_5",
+    ],
 }
 
 
@@ -129,37 +153,33 @@ def _train_lgbm(X: pd.DataFrame, y: pd.Series, stat: str):
 def _weighted_avg_fallback(
     features_df: pd.DataFrame, stat: str
 ) -> np.ndarray:
-    """Original formula as fallback."""
-    l10_col = f"{stat}s_avg_last_10" if stat != "assists" else "assists_avg_last_10"
-    l5_col  = f"{stat}s_avg_last_5"  if stat != "assists" else "assists_avg_last_5"
-    sea_col = f"season_avg_{stat}s"  if stat != "assists" else "season_avg_assists"
+    """Original formula as fallback.
+    Supports: points, rebounds, assists, steals, blocks.
+    """
+    # steals/blocks use singular column names; others use plural (e.g. rebounds_avg_last_5)
+    singular_stats = {"assists", "steals", "blocks"}
+    if stat in singular_stats:
+        l10_col = f"{stat}_avg_last_10"
+        l5_col  = f"{stat}_avg_last_5"
+        sea_col = f"season_avg_{stat}"
+    else:
+        l10_col = f"{stat}s_avg_last_10"
+        l5_col  = f"{stat}s_avg_last_5"
+        sea_col = f"season_avg_{stat}s"
 
-    # normalise column names to what's actually in the df
-    col_map = {
-        "points_avg_last_10":   "points_avg_last_10",
-        "points_avg_last_5":    "points_avg_last_5",
-        "season_avg_points":    "season_avg_points",
-        "rebounds_avg_last_10": "rebounds_avg_last_10",
-        "rebounds_avg_last_5":  "rebounds_avg_last_5",
-        "season_avg_rebounds":  "season_avg_rebounds",
-        "assists_avg_last_10":  "assists_avg_last_10",
-        "assists_avg_last_5":   "assists_avg_last_5",
-        "season_avg_assists":   "season_avg_assists",
-    }
-
-    l10 = features_df.get(f"{stat}_avg_last_10",
-          features_df.get(f"{stat}s_avg_last_10", pd.Series(0.0, index=features_df.index)))
-    l5  = features_df.get(f"{stat}_avg_last_5",
-          features_df.get(f"{stat}s_avg_last_5",  pd.Series(0.0, index=features_df.index)))
-    sea = features_df.get(f"season_avg_{stat}",
-          features_df.get(f"season_avg_{stat}s",  pd.Series(0.0, index=features_df.index)))
+    l10 = features_df.get(l10_col, pd.Series(0.0, index=features_df.index))
+    l5  = features_df.get(l5_col,  pd.Series(0.0, index=features_df.index))
+    sea = features_df.get(sea_col, pd.Series(0.0, index=features_df.index))
 
     base = 0.5 * l10 + 0.3 * l5 + 0.2 * sea
 
     # context adjustments
     pace = features_df.get("pace_adjustment_factor",
                            pd.Series(1.0, index=features_df.index)).fillna(1.0)
-    def_adj = features_df.get(f"defense_adj_{stat[:3]}",
+    # defense_adj column: defense_adj_pts/reb/ast/stl/blk
+    _def_suffix = {"points": "pts", "rebounds": "reb", "assists": "ast",
+                   "steals": "stl", "blocks": "blk"}.get(stat, stat[:3])
+    def_adj = features_df.get(f"defense_adj_{_def_suffix}",
                               pd.Series(1.0, index=features_df.index)).fillna(1.0)
     usage_adj = pd.Series(1.0, index=features_df.index)
     if stat == "points":
@@ -267,7 +287,7 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
         # Join actuals from player_game_logs for training
         logger.info("  Loading actuals for training...")
         actuals = conn.execute("""
-            SELECT game_id, player_id, points, rebounds, assists
+            SELECT game_id, player_id, points, rebounds, assists, steals, blocks
             FROM player_game_logs
         """).df()
         actuals["player_id"] = actuals["player_id"].astype(str)
@@ -292,16 +312,15 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
         latest.get("minutes_avg_last_10", pd.Series(20.0, index=latest.index))
     ).fillna(0.0).values
 
-    for stat in ["points", "rebounds", "assists"]:
+    for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
         feat_cols = STAT_FEATURES[stat]
         available = [c for c in feat_cols if c in train_df.columns]
 
         X_all   = features_df[available].fillna(0.0)
         X_train_df = train_df[available].fillna(0.0)
 
-        target_col = f"{stat}s" if stat != "assists" else "assists"
-        # player_game_logs uses: points, rebounds, assists (no trailing s on assists)
-        actual_col = stat  # points, rebounds, assists
+        # player_game_logs column name for this stat
+        actual_col = stat  # points, rebounds, assists, steals, blocks
         if actual_col not in train_df.columns:
             actual_col = stat + "s"
 
@@ -333,26 +352,22 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
             result[f"{stat}_mean"] = _weighted_avg_fallback(latest, stat)
             logger.info(f"  [{stat}] projections via weighted-average fallback.")
 
-    result = result.rename(columns={
-        "points_mean":   "points_mean",
-        "rebounds_mean": "rebounds_mean",
-        "assists_mean":  "assists_mean",
-    })
+
 
     # Ensure all output columns exist
-    for col in ["points_mean", "rebounds_mean", "assists_mean"]:
+    for col in ["points_mean", "rebounds_mean", "assists_mean", "steals_mean", "blocks_mean"]:
         if col not in result.columns:
             result[col] = 0.0
 
     return result[["game_id", "player_id", "points_mean", "rebounds_mean",
-                   "assists_mean", "minutes_projection"]]
+                   "assists_mean", "steals_mean", "blocks_mean", "minutes_projection"]]
 
 
 def get_feature_importances() -> dict[str, pd.DataFrame]:
     """Return feature importances for each trained stat model."""
     out = {}
     for stat, model in _MODEL_CACHE.items():
-        if stat in ("points", "rebounds", "assists"):
+        if stat in ("points", "rebounds", "assists", "steals", "blocks"):
             feats = STAT_FEATURES[stat]
             imps  = model.feature_importance(importance_type="gain")
             out[stat] = pd.DataFrame({

@@ -149,16 +149,17 @@ def player_profile(player_id: int):
 
         # Season averages
         avgs = conn.execute("""
-            SELECT AVG(points), AVG(rebounds), AVG(assists), AVG(minutes), COUNT(*)
+            SELECT AVG(points), AVG(rebounds), AVG(assists), AVG(minutes), COUNT(*),
+                   AVG(steals), AVG(blocks)
             FROM player_game_logs
             WHERE player_id = CAST(? AS TEXT)
         """, [player_id]).fetchone()
 
         # L10
         l10 = conn.execute("""
-            SELECT AVG(points), AVG(rebounds), AVG(assists)
+            SELECT AVG(points), AVG(rebounds), AVG(assists), AVG(steals), AVG(blocks)
             FROM (
-                SELECT points, rebounds, assists FROM player_game_logs
+                SELECT points, rebounds, assists, steals, blocks FROM player_game_logs
                 WHERE player_id = CAST(? AS TEXT)
                 ORDER BY game_date DESC LIMIT 10
             )
@@ -166,9 +167,9 @@ def player_profile(player_id: int):
 
         # L5
         l5 = conn.execute("""
-            SELECT AVG(points)
+            SELECT AVG(points), AVG(rebounds), AVG(assists), AVG(steals), AVG(blocks)
             FROM (
-                SELECT points FROM player_game_logs
+                SELECT points, rebounds, assists, steals, blocks FROM player_game_logs
                 WHERE player_id = CAST(? AS TEXT)
                 ORDER BY game_date DESC LIMIT 5
             )
@@ -182,7 +183,8 @@ def player_profile(player_id: int):
 
         # Projection
         proj = conn.execute("""
-            SELECT minutes_projection, points_mean, rebounds_mean, assists_mean
+            SELECT minutes_projection, points_mean, rebounds_mean, assists_mean,
+                   COALESCE(steals_mean, 0.0), COALESCE(blocks_mean, 0.0)
             FROM player_projections
             WHERE player_id = CAST(? AS TEXT)
             ORDER BY game_id DESC LIMIT 1
@@ -214,15 +216,25 @@ def player_profile(player_id: int):
             "season_avg_ast":      safe(avgs[2]),
             "season_avg_min":      safe(avgs[3]),
             "games_played":        int(avgs[4]) if avgs and avgs[4] else 0,
+            "season_avg_stl":      safe(avgs[5]),
+            "season_avg_blk":      safe(avgs[6]),
             "l10_avg_pts":         safe(l10[0]),
             "l10_avg_reb":         safe(l10[1]),
             "l10_avg_ast":         safe(l10[2]),
+            "l10_avg_stl":         safe(l10[3]),
+            "l10_avg_blk":         safe(l10[4]),
             "l5_avg_pts":          safe(l5[0]) if l5 else None,
+            "l5_avg_reb":          safe(l5[1]) if l5 else None,
+            "l5_avg_ast":          safe(l5[2]) if l5 else None,
+            "l5_avg_stl":          safe(l5[3]) if l5 else None,
+            "l5_avg_blk":          safe(l5[4]) if l5 else None,
             "season_high_pts":     safe(high[0], 0) if high else None,
             "minutes_projection":  safe(proj[0]) if proj else None,
             "points_projection":   safe(proj[1]) if proj else None,
             "rebounds_projection": safe(proj[2]) if proj else None,
             "assists_projection":  safe(proj[3]) if proj else None,
+            "steals_projection":   safe(proj[4]) if proj else None,
+            "blocks_projection":   safe(proj[5]) if proj else None,
             "opponent":            opponent,
             "next_game_id":        next_game_id,
             "next_game_date":      str(next_game[1]) if next_game else None,
@@ -364,9 +376,12 @@ def player_simulations(player_id: int, stat: str = "points"):
         mean   = float(dist[0]) if dist else 0
         std    = float(dist[1]) if dist else 5
 
-        # Build distribution curve (normal approximation) for frontend chart
+        # Build distribution curve — range depends on stat
+        CURVE_MAX = {
+            "steals": 10, "blocks": 10, "rebounds": 20, "assists": 20,
+        }.get(stat, 80)
         curve = []
-        for i in range(81):
+        for i in range(CURVE_MAX + 1):
             x = float(i)
             if std > 0:
                 y = (1 / (std * math.sqrt(2 * math.pi))) * math.exp(-0.5 * ((x - mean) / std) ** 2)

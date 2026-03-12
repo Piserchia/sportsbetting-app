@@ -34,12 +34,15 @@ PROP_LINES = {
     "points":   [10, 15, 20, 25, 30, 35, 40, 45, 50],
     "rebounds": [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15],
     "assists":  [2, 3, 4, 5, 6, 7, 8, 9, 10, 12],
+    "steals":   [0.5, 1.5, 2.5, 3.5],
+    "blocks":   [0.5, 1.5, 2.5, 3.5],
 }
 
 COMBO_LINES = {
     "PRA": [10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60],
     "PR":  [10, 15, 20, 25, 30, 35, 40, 45],
     "PA":  [10, 15, 20, 25, 30, 35, 40, 45],
+    "SB":  [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
 }
 
 MIN_STD = 1.5
@@ -283,7 +286,9 @@ def simulate_player_props(conn=None) -> int:
     logger.info("Loading projections, distributions, and game logs...")
 
     projections = conn.execute("""
-        SELECT player_id, game_id, points_mean, rebounds_mean, assists_mean
+        SELECT player_id, game_id, points_mean, rebounds_mean, assists_mean,
+               COALESCE(steals_mean, 0.0) AS steals_mean,
+               COALESCE(blocks_mean, 0.0) AS blocks_mean
         FROM player_projections
     """).df()
 
@@ -293,7 +298,7 @@ def simulate_player_props(conn=None) -> int:
     """).df()
 
     game_logs = conn.execute("""
-        SELECT player_id, game_id, points, rebounds, assists
+        SELECT player_id, game_id, points, rebounds, assists, steals, blocks
         FROM player_game_logs
     """).df()
 
@@ -310,6 +315,8 @@ def simulate_player_props(conn=None) -> int:
         proj_means[(pid, "points")]   = float(row["points_mean"])
         proj_means[(pid, "rebounds")] = float(row["rebounds_mean"])
         proj_means[(pid, "assists")]  = float(row["assists_mean"])
+        proj_means[(pid, "steals")]   = float(row["steals_mean"])
+        proj_means[(pid, "blocks")]   = float(row["blocks_mean"])
 
     dist_lookup: dict[tuple, dict] = {}
     for _, row in distributions.iterrows():
@@ -321,7 +328,7 @@ def simulate_player_props(conn=None) -> int:
         }
 
     logs_by_player = {
-        str(pid): grp
+        str(pid): grp.copy()
         for pid, grp in game_logs.groupby("player_id")
     }
 
@@ -345,23 +352,34 @@ def simulate_player_props(conn=None) -> int:
 
         game_id = dist_lookup[pts_key]["game_id"]
 
+        stl_key = (player_id, "steals")
+        blk_key = (player_id, "blocks")
+
         mean_pts = proj_means.get(pts_key, dist_lookup[pts_key]["mean"])
         mean_reb = proj_means.get(reb_key, dist_lookup.get(reb_key, {}).get("mean", 0.0))
         mean_ast = proj_means.get(ast_key, dist_lookup.get(ast_key, {}).get("mean", 0.0))
+        mean_stl = proj_means.get(stl_key, dist_lookup.get(stl_key, {}).get("mean", 0.8))
+        mean_blk = proj_means.get(blk_key, dist_lookup.get(blk_key, {}).get("mean", 0.5))
 
         std_pts = max(dist_lookup[pts_key]["std_dev"], MIN_STD)
         std_reb = max(dist_lookup.get(reb_key, {}).get("std_dev", MIN_STD), MIN_STD)
         std_ast = max(dist_lookup.get(ast_key, {}).get("std_dev", MIN_STD), MIN_STD)
+        std_stl = max(dist_lookup.get(stl_key, {}).get("std_dev", 0.8), 0.5)
+        std_blk = max(dist_lookup.get(blk_key, {}).get("std_dev", 0.7), 0.5)
 
         # ── Individual prop simulations with better distributions ─────────
         sim_pts = _sim_lognormal(rng, mean_pts, std_pts, SIMULATION_COUNT)
         sim_reb = _sim_negbin(rng, mean_reb, std_reb, SIMULATION_COUNT)
         sim_ast = _sim_negbin(rng, mean_ast, std_ast, SIMULATION_COUNT)
+        sim_stl = _sim_negbin(rng, mean_stl, std_stl, SIMULATION_COUNT)
+        sim_blk = _sim_negbin(rng, mean_blk, std_blk, SIMULATION_COUNT)
 
         for stat, simulated in [
             ("points",   sim_pts),
             ("rebounds", sim_reb),
             ("assists",  sim_ast),
+            ("steals",   sim_stl),
+            ("blocks",   sim_blk),
         ]:
             for line in PROP_LINES[stat]:
                 prob = float(np.mean(simulated >= line))
@@ -404,6 +422,46 @@ def simulate_player_props(conn=None) -> int:
                     "line":        float(line),
                     "probability": round(prob, 6),
                 })
+
+        # ── SB (Steals + Blocks) correlated combo ─────────────────────────
+        # Use 2D copula with Spearman correlation from game logs
+        try:
+            sb_data = player_log_df[["steals", "blocks"]].dropna()
+            if len(sb_data) >= 10:
+                sb_corr, _ = stats.spearmanr(sb_data.values)
+                sb_corr_val = float(sb_corr) if np.ndim(sb_corr) == 0 else 0.3
+            else:
+                sb_corr_val = 0.3
+            sb_corr_val = float(np.clip(sb_corr_val, -0.99, 0.99))
+            sb_corr_matrix = np.array([[1.0, sb_corr_val], [sb_corr_val, 1.0]])
+            # Ensure PSD
+            eigvals, eigvecs = np.linalg.eigh(sb_corr_matrix)
+            eigvals = np.clip(eigvals, 1e-6, None)
+            sb_corr_matrix = (eigvecs @ np.diag(eigvals) @ eigvecs.T).copy()
+            np.fill_diagonal(sb_corr_matrix, 1.0)
+
+            L_sb = np.linalg.cholesky(sb_corr_matrix + 1e-8 * np.eye(2))
+            z_sb = rng.standard_normal((SIMULATION_COUNT, 2))
+            u_sb = stats.norm.cdf(z_sb @ L_sb.T)
+
+            stl_p = _fit_negbin(mean_stl, std_stl)
+            blk_p = _fit_negbin(mean_blk, std_blk)
+            sim_stl_c = stats.nbinom.ppf(np.clip(u_sb[:, 0], 1e-6, 1 - 1e-6), stl_p.n, stl_p.p).astype(float)
+            sim_blk_c = stats.nbinom.ppf(np.clip(u_sb[:, 1], 1e-6, 1 - 1e-6), blk_p.n, blk_p.p).astype(float)
+        except Exception:
+            sim_stl_c = sim_stl
+            sim_blk_c = sim_blk
+
+        sim_sb = sim_stl_c + sim_blk_c
+        for line in COMBO_LINES["SB"]:
+            prob = float(np.mean(sim_sb >= line))
+            records.append({
+                "game_id":     game_id,
+                "player_id":   player_id,
+                "stat":        "SB",
+                "line":        float(line),
+                "probability": round(prob, 6),
+            })
 
     elapsed = time.time() - t0
     logger.info(f"  Simulations complete in {elapsed:.2f}s — {len(records):,} rows")
