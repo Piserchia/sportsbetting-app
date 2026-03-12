@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import PipelineStatus from "./PipelineStatus";
 import EdgesDashboard from "./EdgesDashboard";
 import EdgesDashboard2 from "./EdgesDashboard2";
+import PipelineExplorer from "./PipelineExplorer";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, AreaChart, Area, Cell,
@@ -331,6 +332,7 @@ export default function PropDashboard() {
               { key: "edges",    label: "Edges" },
               { key: "edges2",   label: "Edges v2" },
               { key: "pipeline", label: "Pipeline" },
+              { key: "explorer", label: "How It Works" },
             ].map(tab => (
               <button
                 key={tab.key}
@@ -357,6 +359,7 @@ export default function PropDashboard() {
       </div>
 
       {page === "pipeline" && <PipelineStatus />}
+      {page === "explorer" && <PipelineExplorer />}
       {page === "edges" && (
         <EdgesDashboard onPlayerSelect={p => { setPage("props"); handleSelect(p); }} />
       )}
