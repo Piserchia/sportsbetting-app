@@ -70,7 +70,7 @@ LEAGUE_ID = "NBA"
 PROPS_DEV_MODE = os.getenv("PROPS_DEV_MODE", "false").lower() == "true"
 PROPS_COOLDOWN_MINUTES = int(os.getenv("PROPS_COOLDOWN_MINUTES", "1440" if PROPS_DEV_MODE else "60"))
 
-DEFAULT_BOOKS = ["draftkings", "fanduel", "betmgm"]
+DEFAULT_BOOKS = ["draftkings", "fanduel"]
 if PROPS_DEV_MODE:
     BOOKS = ["draftkings"]
     logger.warning("PROPS_DEV_MODE active — draftkings only, 24hr cooldown")
@@ -150,17 +150,22 @@ def _check_api_key() -> bool:
     return True
 
 
-def fetch_events_with_props() -> list:
+def fetch_events_with_props(include_alternates: bool = True) -> list:
     """
     Fetch upcoming NBA events that have odds from SportsGameOdds /v2/events.
     Returns list of event dicts (each has .odds and .players).
     """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    tomorrow = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+
     url = f"{SGO_BASE_URL}/events"
     params = {
-        "apiKey":      SGO_API_KEY,
-        "leagueID":    LEAGUE_ID,
-        "started":     "false",
-        "oddsPresent": "true",
+        "apiKey":          SGO_API_KEY,
+        "leagueID":        LEAGUE_ID,
+        "startsAfter":     today,
+        "startsBefore":    tomorrow,
+        "oddsPresent":     "true",
+        "includeAltLines": "true" if include_alternates else "false",
     }
 
     logger.info("Fetching NBA events with props from SportsGameOdds...")
@@ -288,7 +293,8 @@ def _rebuild_sportsbook_props(conn, today_game_ids: list):
 # ── Prop Parsing ──────────────────────────────────────────────────────────────
 
 def _parse_props_from_events(events: list, books: list, player_lookup: dict,
-                              today_game_ids: list, conn) -> list:
+                              today_game_ids: list, conn,
+                              include_alternates: bool = True) -> list:
     """
     Parse player prop records from SGO events.
 
@@ -299,19 +305,22 @@ def _parse_props_from_events(events: list, books: list, player_lookup: dict,
       - statID in MODELED_STATS
       - playerID present
 
-    Then for each matching book in byBookmaker, emits one record with
-    both over_odds and under_odds (looked up from the opposing odd).
+    Emits one record per (player, stat, line, book) for the standard line,
+    plus one record per alt line in byBookmaker[book].altLines when
+    include_alternates=True.
+
+    Under odds for alt lines come from the opposing (under) odd's altLines,
+    matched by overUnder value.
 
     Returns list of dicts ready for prop_line_history insert.
     """
     records = []
 
     for event in events:
-        sgo_event_id = event.get("eventID", "")
-        starts_at    = event.get("status", {}).get("startsAt", "")
-        event_date   = starts_at[:10] if starts_at else ""
-        odds_map     = event.get("odds", {})
-        players_map  = event.get("players", {})
+        starts_at   = event.get("status", {}).get("startsAt", "")
+        event_date  = starts_at[:10] if starts_at else ""
+        odds_map    = event.get("odds", {})
+        players_map = event.get("players", {})
 
         game_id = _match_game_id(conn, event_date, today_game_ids)
         if not game_id:
@@ -342,48 +351,73 @@ def _parse_props_from_events(events: list, books: list, player_lookup: dict,
                 logger.debug(f"  Unmatched player: '{player_name}' ({sgo_player_id})")
                 continue
 
-            # Get the opposing (under) odd for under_odds
-            opposing_key = odd.get("opposingOddID", "")
-            under_odd    = odds_map.get(opposing_key, {})
-
-            by_book = odd.get("byBookmaker", {})
+            opposing_key   = odd.get("opposingOddID", "")
+            under_odd      = odds_map.get(opposing_key, {})
+            by_book        = odd.get("byBookmaker", {})
+            under_by_book  = under_odd.get("byBookmaker", {})
 
             for book_id, book_data in by_book.items():
                 if book_id not in books:
                     continue
-                if not book_data.get("available", False):
+
+                under_book = under_by_book.get(book_id, {})
+
+                # ── Standard line ──────────────────────────────────────
+                if book_data.get("available", False):
+                    line = book_data.get("overUnder")
+                    if line is not None:
+                        under_odds_str = under_book.get("odds") if under_book.get("available") else None
+                        records.append(_make_record(
+                            now, book_id, player_id, player_name, game_id, stat,
+                            float(line),
+                            _american_to_float(book_data.get("odds")),
+                            _american_to_float(under_odds_str),
+                        ))
+
+                # ── Alternate lines ────────────────────────────────────
+                if not include_alternates:
                     continue
 
-                line = book_data.get("overUnder")
-                if line is None:
-                    continue
+                under_alt_map = {
+                    str(a["overUnder"]): a
+                    for a in under_book.get("altLines", [])
+                    if a.get("available", False)
+                }
 
-                over_odds_str  = book_data.get("odds")
-                # Under odds: from opposing odd's byBookmaker for same book
-                under_book     = under_odd.get("byBookmaker", {}).get(book_id, {})
-                under_odds_str = under_book.get("odds")
-
-                over_odds  = _american_to_float(over_odds_str)
-                under_odds = _american_to_float(under_odds_str)
-
-                history_id = md5(
-                    f"{now}_{book_id}_{player_id}_{stat}_{line}".encode()
-                ).hexdigest()
-
-                records.append({
-                    "history_id":  history_id,
-                    "fetched_at":  now,
-                    "book":        book_id,
-                    "player_id":   player_id,
-                    "player_name": player_name,
-                    "game_id":     game_id,
-                    "stat":        stat,
-                    "line":        float(line),
-                    "over_odds":   over_odds,
-                    "under_odds":  under_odds,
-                })
+                for alt in book_data.get("altLines", []):
+                    if not alt.get("available", False):
+                        continue
+                    alt_line = alt.get("overUnder")
+                    if alt_line is None:
+                        continue
+                    matching_under = under_alt_map.get(str(alt_line), {})
+                    records.append(_make_record(
+                        now, book_id, player_id, player_name, game_id, stat,
+                        float(alt_line),
+                        _american_to_float(alt.get("odds")),
+                        _american_to_float(matching_under.get("odds")),
+                    ))
 
     return records
+
+
+def _make_record(now, book_id, player_id, player_name, game_id, stat,
+                 line, over_odds, under_odds) -> dict:
+    history_id = md5(
+        f"{now}_{book_id}_{player_id}_{stat}_{line}".encode()
+    ).hexdigest()
+    return {
+        "history_id":  history_id,
+        "fetched_at":  now,
+        "book":        book_id,
+        "player_id":   player_id,
+        "player_name": player_name,
+        "game_id":     game_id,
+        "stat":        stat,
+        "line":        line,
+        "over_odds":   over_odds,
+        "under_odds":  under_odds,
+    }
 
 
 def _american_to_float(odds_str) -> Optional[float]:
@@ -398,10 +432,13 @@ def _american_to_float(odds_str) -> Optional[float]:
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 
-def ingest_props(conn=None) -> int:
+def ingest_props(include_alternates: bool = True, conn=None) -> int:
     """
     Fetch player prop lines from SportsGameOdds and write to sportsbook_props.
     Optimized for free-tier: today's games only, configured books, cooldown guard.
+
+    Args:
+        include_alternates: Whether to ingest alternate line ladders (default True).
 
     Returns:
         Number of prop rows written to prop_line_history.
@@ -433,7 +470,7 @@ def ingest_props(conn=None) -> int:
     logger.info(f"  Player lookup built — {len(player_lookup)} active players.")
 
     try:
-        events = fetch_events_with_props()
+        events = fetch_events_with_props(include_alternates=include_alternates)
     except requests.HTTPError as e:
         logger.error(f"SportsGameOdds HTTP error: {e.response.status_code} — {e.response.text}")
         _log_ingestion(conn, "sportsgameodds", "props", 0, "error", str(e))
@@ -458,7 +495,8 @@ def ingest_props(conn=None) -> int:
     logger.info(f"  Processing {len(events)} events...")
 
     prop_records = _parse_props_from_events(
-        events, BOOKS, player_lookup, today_game_ids, conn
+        events, BOOKS, player_lookup, today_game_ids, conn,
+        include_alternates=include_alternates,
     )
 
     written = 0
