@@ -522,6 +522,94 @@ def games_today():
         conn.close()
 
 
+@app.get("/pipeline/status")
+def pipeline_status():
+    """
+    Returns last-run timestamps and record counts for each pipeline stage.
+    Used by the frontend Pipeline Status page.
+    """
+    conn = get_connection()
+    try:
+        # Last run per source/entity from ingestion_log.
+        # Strip season suffixes (e.g. "games:2024-25" → "games") for grouping.
+        log_rows = conn.execute("""
+            SELECT source, entity, status, records_written, message, ran_at
+            FROM (
+                SELECT *,
+                    REGEXP_REPLACE(entity, ':.*$', '') AS entity_base,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY source, REGEXP_REPLACE(entity, ':.*$', '')
+                        ORDER BY ran_at DESC
+                    ) AS rn
+                FROM ingestion_log
+            ) WHERE rn = 1
+            ORDER BY source, entity_base
+        """).fetchall()
+
+        ingestion = [
+            {
+                "source":   r[0],
+                "entity":   r[1].split(":")[0],  # strip season suffix for key matching
+                "status":   r[2],
+                "records":  r[3],
+                "message":  r[4],
+                "ran_at":   str(r[5]),
+            }
+            for r in log_rows
+        ]
+
+        # DB record counts for key tables
+        def count(table):
+            try:
+                return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except Exception:
+                return 0
+
+        def latest(table, col="game_id"):
+            try:
+                row = conn.execute(f"SELECT MAX({col}) FROM {table}").fetchone()
+                return str(row[0]) if row and row[0] else None
+            except Exception:
+                return None
+
+        counts = {
+            "teams":              count("teams"),
+            "players":            count("players"),
+            "games":              count("games"),
+            "player_game_stats":  count("player_game_stats"),
+            "player_game_logs":   count("player_game_logs"),
+            "player_features":    count("player_features"),
+            "player_projections": count("player_projections"),
+            "player_simulations": count("player_simulations"),
+            "sportsbook_props":   count("sportsbook_props"),
+            "prop_line_history":  count("prop_line_history"),
+            "prop_edges":         count("prop_edges"),
+        }
+
+        # Most recent game date in the DB
+        latest_game = conn.execute(
+            "SELECT MAX(game_date) FROM games WHERE status = 'Final'"
+        ).fetchone()
+        latest_game_date = str(latest_game[0]) if latest_game and latest_game[0] else None
+
+        # Most recent feature build
+        latest_feature = conn.execute(
+            "SELECT g.game_date FROM player_features pf "
+            "JOIN games g ON pf.game_id = g.game_id "
+            "ORDER BY g.game_date DESC LIMIT 1"
+        ).fetchone()
+        latest_feature_date = str(latest_feature[0]) if latest_feature and latest_feature[0] else None
+
+        return {
+            "ingestion":           ingestion,
+            "counts":              counts,
+            "latest_game_date":    latest_game_date,
+            "latest_feature_date": latest_feature_date,
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/games/{game_id}/matchup-flags")
 def matchup_flags(game_id: str, player_id: int = Query(...)):
     """

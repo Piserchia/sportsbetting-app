@@ -16,6 +16,7 @@ Falls back to normal distribution if parameter fitting fails.
 
 from __future__ import annotations
 
+import uuid
 import logging
 import time
 from typing import NamedTuple
@@ -469,11 +470,15 @@ def simulate_player_props(conn=None) -> int:
     sim_df = pd.DataFrame(records)
     conn.execute("DELETE FROM player_simulations")
     conn.execute("INSERT INTO player_simulations SELECT * FROM sim_df")
-    logger.info(f"  → {len(sim_df):,} rows written to player_simulations.")
-
+    n_sim = len(sim_df)
+    logger.info(f"  → {n_sim:,} rows written to player_simulations.")
+    conn.execute(
+        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+        [str(uuid.uuid4()), "simulation", "player_simulations", n_sim, "success", ""]
+    )
     if close:
         conn.close()
-    return len(sim_df)
+    return n_sim
 
 
 def probability_to_american_odds(probability: float) -> int:

@@ -7,6 +7,7 @@ player_features.minutes_projection.
 Populates: player_projections, player_distributions
 """
 
+import uuid
 import logging
 import pandas as pd
 import numpy as np
@@ -38,12 +39,17 @@ def generate_projections(conn=None) -> int:
         if not ml_projections.empty:
             conn.execute("DELETE FROM player_projections")
             conn.execute("INSERT INTO player_projections SELECT * FROM ml_projections")
-            logger.info(f"  → {len(ml_projections)} rows written to player_projections (ML).")
+            n_ml = len(ml_projections)
+            logger.info(f"  → {n_ml} rows written to player_projections (ML).")
             dist_count = build_distributions(conn)
             logger.info(f"  → {dist_count} rows written to player_distributions.")
+            conn.execute(
+                "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+                [str(uuid.uuid4()), "projection_model", "player_projections", n_ml, "success", "ML"]
+            )
             if close:
                 conn.close()
-            return len(ml_projections)
+            return n_ml
     except Exception as e:
         logger.warning(f"  ML projections failed: {e} — falling back to heuristic")
 
@@ -110,9 +116,14 @@ def generate_projections(conn=None) -> int:
 
     dist_count = build_distributions(conn)
     logger.info(f"  → {dist_count} rows written to player_distributions.")
+    n = len(projections)
+    conn.execute(
+        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+        [str(uuid.uuid4()), "projection_model", "player_projections", n, "success", ""]
+    )
     if close:
         conn.close()
-    return len(projections)
+    return n
 
 
 def build_distributions(conn=None) -> int:

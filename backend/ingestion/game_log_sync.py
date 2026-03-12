@@ -6,6 +6,7 @@ Syncs data from player_game_stats (raw nba_api data) into player_game_logs
 This is the bridge between ingestion and modeling layers.
 """
 
+import uuid
 import logging
 from backend.db.connection import get_connection, init_model_schema
 
@@ -58,6 +59,10 @@ def sync_game_logs(conn=None) -> int:
     """).fetchone()[0]
 
     logger.info(f"  → player_game_logs now contains {count:,} rows.")
+    conn.execute(
+        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+        [str(uuid.uuid4()), "game_log_sync", "player_game_logs", count, "success", ""]
+    )
     if close:
         conn.close()
     return count

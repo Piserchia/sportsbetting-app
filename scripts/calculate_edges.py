@@ -15,6 +15,7 @@ Usage:
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import uuid
 import logging
 import pandas as pd
 from config.logging_config import setup_logging
@@ -163,8 +164,13 @@ def _write_model_only_edges(conn) -> int:
 
     conn.execute("DELETE FROM prop_edges")
     conn.execute("INSERT INTO prop_edges SELECT * FROM result")
-    logger.info(f"  → {len(result):,} model-only rows written to prop_edges.")
-    return len(result)
+    n_edges = len(result)
+    logger.info(f"  → {n_edges:,} model-only rows written to prop_edges.")
+    conn.execute(
+        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+        [str(uuid.uuid4()), "edge_calculator", "prop_edges", n_edges, "success", ""]
+    )
+    return n_edges
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ player_features as a single wide table. Missing context features
 model degrades gracefully when context data is unavailable.
 """
 
+import uuid
 import logging
 import pandas as pd
 import numpy as np
@@ -374,7 +375,10 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
 
     n = len(features)
     logger.info(f"  → {n} feature rows written to player_features.")
-
+    conn.execute(
+        "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
+        [str(uuid.uuid4()), "feature_builder", "player_features", n, "success", ""]
+    )
     if close:
         conn.close()
     return n

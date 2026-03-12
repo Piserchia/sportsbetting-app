@@ -99,6 +99,19 @@ if __name__ == "__main__":
 
         schedule.every(2).hours.do(odds_only)
 
+        # Props fetch at fixed daily times (free-tier optimized)
+        def props_only():
+            from backend.db.connection import init_model_schema
+            conn = get_connection()
+            init_schema(conn)
+            init_model_schema(conn)
+            ingest_props(conn=conn)
+            conn.close()
+
+        for t in ["06:00", "12:00", "16:00", "19:00"]:
+            schedule.every().day.at(t).do(props_only)
+        logger.info("Props schedule: 6am, 12pm, 4pm, 7pm")
+
         # Run once immediately on start
         run_pipeline(skip_box_scores=skip, full_rebuild=rebuild)
 

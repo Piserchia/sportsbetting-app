@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import PipelineStatus from "./PipelineStatus";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, AreaChart, Area, Cell,
@@ -219,6 +220,7 @@ function PlayerSearch({ onSelect }) {
 
 // ── Main Dashboard ─────────────────────────────────────────────────────────
 export default function PropDashboard() {
+  const [page, setPage]                 = useState("props"); // "props" | "pipeline"
   const [activeStat, setActiveStat]     = useState("points");
   const [selectedLine, setSelectedLine] = useState(null);
   const [playerId, setPlayerId]         = useState(null);
@@ -319,17 +321,40 @@ export default function PropDashboard() {
               borderRadius: 4, letterSpacing: "0.05em",
             }}>{CURRENT_SEASON}</span>
           </div>
-          <PlayerSearch onSelect={handleSelect} />
+          {page === "props" && <PlayerSearch onSelect={handleSelect} />}
+          {/* Nav tabs */}
+          <div style={{ display: "flex", gap: 2, marginLeft: 16 }}>
+            {[
+              { key: "props",    label: "Props" },
+              { key: "pipeline", label: "Pipeline" },
+            ].map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setPage(tab.key)}
+                className="stat-tab"
+                style={{
+                  padding: "5px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+                  background: page === tab.key ? T.accentBg : "transparent",
+                  color: page === tab.key ? T.accent : T.textSub,
+                  border: page === tab.key ? `1px solid #b6f0d8` : "1px solid transparent",
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
           <div style={{ marginLeft: "auto", color: T.textFaint, fontSize: 11 }}>
-            {propsData?.source === "model_only"
+            {page === "props" && (propsData?.source === "model_only"
               ? <span style={{ color: T.warn, fontWeight: 600 }}>⚡ Model only — no sportsbook data</span>
               : <span style={{ color: T.accent, fontWeight: 600 }}>✓ Live sportsbook data</span>
-            }
+            )}
           </div>
         </div>
       </div>
 
-      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "24px 28px" }}>
+      {page === "pipeline" && <PipelineStatus />}
+
+      {page === "props" && <div style={{ maxWidth: 1400, margin: "0 auto", padding: "24px 28px" }}>
 
         {!playerId && !loading && (
           <div style={{
@@ -725,7 +750,7 @@ export default function PropDashboard() {
             </div>
           </>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
