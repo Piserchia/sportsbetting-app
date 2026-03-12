@@ -24,7 +24,8 @@ from backend.models.pace_features    import build_pace_features
 from backend.models.defense_features import build_defense_features
 from backend.models.minutes_model    import build_minutes_features
 from backend.models.usage_features   import build_usage_features
-from backend.models.positional_defense import build_positional_defense_features
+from backend.models.positional_defense_features import build_positional_defense_features
+from backend.ingestion.injury_lineup_ingestor import get_teammate_injury_multipliers
 
 logger = logging.getLogger(__name__)
 
@@ -238,16 +239,40 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         else:
             features[col] = features[col].fillna(default)
 
+    # ── 6c. Injury context — boost usage_proxy for players with injured teammates ──
+    logger.info("  Applying injury context to usage_proxy...")
+    try:
+        injury_multipliers = get_teammate_injury_multipliers(conn=conn)
+        if injury_multipliers:
+            features["usage_proxy"] = features.apply(
+                lambda row: round(
+                    float(row["usage_proxy"]) * injury_multipliers.get(str(row["player_id"]), 1.0),
+                    4,
+                ),
+                axis=1,
+            )
+            logger.info(f"  → Injury multipliers applied to {len(injury_multipliers)} players")
+        else:
+            logger.info("  → No injury multipliers available (no injured teammates found)")
+    except Exception as e:
+        logger.warning(f"  Injury context failed: {e} — skipping")
+
     if not pos_def_df.empty:
-        # pos_def_df uses player_id from box scores (int-cast string); align types
         pos_def_df["player_id"] = pos_def_df["player_id"].astype(str)
-        merge_cols = [c for c in pos_def_df.columns if c not in ("game_id", "player_id") or c in key]
-        features = features.merge(pos_def_df[key + [c for c in pos_def_df.columns if c not in key]], on=key, how="left")
+        features = features.merge(
+            pos_def_df[key + [c for c in pos_def_df.columns if c not in key]],
+            on=key, how="left",
+        )
     for col, default in [
-        ("pos_defense_adj_pts", 1.0),
-        ("pos_defense_adj_reb", 1.0),
-        ("pos_defense_adj_ast", 1.0),
-        ("position_group",      "FORWARD"),
+        ("positional_defense_adj_pts", 1.0),
+        ("positional_defense_adj_reb", 1.0),
+        ("positional_defense_adj_ast", 1.0),
+        ("defense_vs_pg",              8.0),
+        ("defense_vs_sg",              8.0),
+        ("defense_vs_sf",              8.0),
+        ("defense_vs_pf",              8.0),
+        ("defense_vs_c",               8.0),
+        ("player_position",            "SF"),
     ]:
         if col not in features.columns:
             features[col] = default
@@ -268,8 +293,9 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         "opponent_points_allowed", "opponent_rebounds_allowed", "opponent_assists_allowed",
         "defense_adj_pts", "defense_adj_reb", "defense_adj_ast",
         "usage_proxy", "usage_trend_last_5",
-        "pos_defense_adj_pts", "pos_defense_adj_reb", "pos_defense_adj_ast",
-        "position_group",
+        "positional_defense_adj_pts", "positional_defense_adj_reb", "positional_defense_adj_ast",
+        "defense_vs_pg", "defense_vs_sg", "defense_vs_sf", "defense_vs_pf", "defense_vs_c",
+        "player_position",
     ]
     features = features[[c for c in expected_cols if c in features.columns]]
 

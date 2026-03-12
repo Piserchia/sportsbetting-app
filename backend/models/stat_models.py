@@ -82,7 +82,11 @@ STAT_FEATURES = {
 
 
 def _train_lgbm(X: pd.DataFrame, y: pd.Series, stat: str):
-    """Train one LightGBM regressor for a given stat."""
+    """Train one LightGBM regressor for a given stat.
+
+    Uses the most recent 20% of rows as a validation set (chronological
+    split) so early stopping evaluates on held-out data.
+    """
     import lightgbm as lgb
 
     params = {
@@ -100,17 +104,24 @@ def _train_lgbm(X: pd.DataFrame, y: pd.Series, stat: str):
         "n_jobs":           -1,
         "seed":             42,
     }
-    dtrain = lgb.Dataset(X, label=y)
+
+    split = int(len(X) * 0.80)
+    X_train, X_val = X.iloc[:split], X.iloc[split:]
+    y_train, y_val = y.iloc[:split], y.iloc[split:]
+
+    dtrain = lgb.Dataset(X_train, label=y_train)
+    dval   = lgb.Dataset(X_val,   label=y_val, reference=dtrain)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         model = lgb.train(
             params, dtrain, num_boost_round=400,
-            valid_sets=[dtrain],
+            valid_sets=[dval],
             callbacks=[lgb.early_stopping(40, verbose=False), lgb.log_evaluation(-1)],
         )
     logger.info(
-        f"    [{stat}] trained on {len(X):,} rows  "
-        f"best_iter={model.best_iteration}"
+        f"    [{stat}] trained on {len(X_train):,} rows, "
+        f"validated on {len(X_val):,}  best_iter={model.best_iteration}"
     )
     return model
 

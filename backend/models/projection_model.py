@@ -16,6 +16,10 @@ from backend.models.stat_models import generate_ml_projections
 
 logger = logging.getLogger(__name__)
 
+PACE_ADJ_MIN,  PACE_ADJ_MAX  = 0.85, 1.15
+DEF_ADJ_MIN,   DEF_ADJ_MAX   = 0.80, 1.20
+USAGE_ADJ_MIN, USAGE_ADJ_MAX = 0.85, 1.15
+
 
 def generate_projections(conn=None) -> int:
     """

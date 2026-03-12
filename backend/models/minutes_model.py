@@ -17,7 +17,10 @@ Outputs:
 """
 
 import logging
+import pickle
 import warnings
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -36,6 +39,26 @@ logger = logging.getLogger(__name__)
 BLOWOUT_MILD   = 10.0
 BLOWOUT_HEAVY  = 15.0
 MIN_TRAIN_ROWS = 200
+
+_SAVED_MODEL_PATH = Path(__file__).parent.parent.parent / "data" / "models" / "minutes_lgbm.pkl"
+_LOADED_MODEL     = None   # cache for the saved model
+
+
+def _try_load_saved_model():
+    """Load the pre-trained model from disk if available. Returns (model, features) or (None, None)."""
+    global _LOADED_MODEL
+    if _LOADED_MODEL is not None:
+        return _LOADED_MODEL
+    if _SAVED_MODEL_PATH.exists():
+        try:
+            with open(_SAVED_MODEL_PATH, "rb") as f:
+                payload = pickle.load(f)
+            _LOADED_MODEL = (payload["model"], payload["features"])
+            logger.info(f"  Loaded pre-trained minutes model from {_SAVED_MODEL_PATH}")
+            return _LOADED_MODEL
+        except Exception as e:
+            logger.warning(f"  Could not load saved minutes model: {e}")
+    return None, None
 
 
 def rolling_linear_slope(series: pd.Series, window: int = 10) -> pd.Series:
@@ -156,15 +179,15 @@ def build_minutes_features(logs_df: pd.DataFrame, conn=None) -> pd.DataFrame:
         if close:
             conn.close()
 
-    model = None
-    feature_names = None
+    # Try saved (pre-trained) model first, then in-memory training, then heuristic
+    model, feature_names = _try_load_saved_model()
 
-    if HAS_LGB:
+    if model is None and HAS_LGB:
         try:
             train_df = _build_training_data(logs_df, spreads, paces, home_games)
             if len(train_df) >= MIN_TRAIN_ROWS:
                 model, feature_names = _train_lgb_model(train_df)
-                logger.info(f"  LightGBM minutes model trained on {len(train_df):,} samples.")
+                logger.info(f"  LightGBM minutes model trained in-memory on {len(train_df):,} samples.")
             else:
                 logger.info(f"  Only {len(train_df)} training rows — using heuristic minutes model.")
         except Exception as e:

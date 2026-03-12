@@ -345,10 +345,15 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("usage_proxy",                  "DOUBLE",  "0.2"),
         ("usage_trend_last_5",           "DOUBLE",  "0.0"),
         ("minutes_projection",           "DOUBLE",  "0.0"),
-        ("pos_defense_adj_pts",          "DOUBLE",  "1.0"),
-        ("pos_defense_adj_reb",          "DOUBLE",  "1.0"),
-        ("pos_defense_adj_ast",          "DOUBLE",  "1.0"),
-        ("position_group",               "VARCHAR", "'FORWARD'"),
+        ("positional_defense_adj_pts",    "DOUBLE",  "1.0"),
+        ("positional_defense_adj_reb",    "DOUBLE",  "1.0"),
+        ("positional_defense_adj_ast",    "DOUBLE",  "1.0"),
+        ("defense_vs_pg",                 "DOUBLE",  "8.0"),
+        ("defense_vs_sg",                 "DOUBLE",  "8.0"),
+        ("defense_vs_sf",                 "DOUBLE",  "8.0"),
+        ("defense_vs_pf",                 "DOUBLE",  "8.0"),
+        ("defense_vs_c",                  "DOUBLE",  "8.0"),
+        ("player_position",               "VARCHAR", "'SF'"),
     ]
     existing_cols = {
         row[0]: row[1] for row in conn.execute(
@@ -401,18 +406,18 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS model_backtests (
-            season          TEXT,
+            backtest_id     TEXT PRIMARY KEY,
+            run_date        TEXT,
+            model_version   TEXT,
             stat            TEXT,
             line            DOUBLE,
-            n_samples       INTEGER,
+            n_predictions   INTEGER,
             hit_rate        DOUBLE,
-            avg_model_prob  DOUBLE,
             brier_score     DOUBLE,
             log_loss        DOUBLE,
-            simulated_bets  INTEGER,
-            simulated_roi   DOUBLE,
-            simulated_profit DOUBLE,
-            PRIMARY KEY (season, stat, line)
+            roi             DOUBLE,
+            avg_edge        DOUBLE,
+            created_at      TEXT
         )
     """)
 

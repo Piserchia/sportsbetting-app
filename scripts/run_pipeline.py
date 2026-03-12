@@ -26,6 +26,7 @@ from backend.ingestion.nba_ingestor import (
 from backend.ingestion.odds_ingestor import ingest_odds
 from backend.ingestion.props_ingestor import ingest_props
 from backend.ingestion.game_log_sync import sync_game_logs
+from backend.ingestion.injury_lineup_ingestor import ingest_injuries_and_lineups
 from backend.models.feature_builder import build_player_features
 from backend.models.projection_model import generate_projections
 from backend.models.simulation_engine import simulate_player_props
@@ -34,7 +35,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline(skip_box_scores: bool = False):
+def run_pipeline(skip_box_scores: bool = False, full_rebuild: bool = False):
     logger.info("=" * 60)
     logger.info("Starting full ingestion pipeline...")
     logger.info("=" * 60)
@@ -54,11 +55,12 @@ def run_pipeline(skip_box_scores: bool = False):
 
         ingest_odds(conn=conn)
         ingest_props(conn=conn)
+        ingest_injuries_and_lineups(conn=conn)
 
         # Model pipeline
         logger.info("Running model pipeline...")
         sync_game_logs(conn=conn)
-        build_player_features(conn=conn)
+        build_player_features(conn=conn, incremental=not full_rebuild)
         generate_projections(conn=conn)
         simulate_player_props(conn=conn)
 
@@ -75,15 +77,18 @@ if __name__ == "__main__":
     parser.add_argument("--schedule", action="store_true",
                         help="Run on a schedule (daily 6am + odds every 2hrs)")
     parser.add_argument("--skip-box-scores", action="store_true")
+    parser.add_argument("--full-rebuild", action="store_true",
+                        help="Clear and rebuild player_features from scratch")
     args = parser.parse_args()
 
-    skip = args.skip_box_scores
+    skip    = args.skip_box_scores
+    rebuild = args.full_rebuild
 
     if args.schedule:
         logger.info("Running in scheduled mode...")
 
         # Full pipeline daily at 6am
-        schedule.every().day.at("06:00").do(run_pipeline, skip_box_scores=False)
+        schedule.every().day.at("06:00").do(run_pipeline, skip_box_scores=False, full_rebuild=False)
 
         # Odds-only refresh every 2 hours during game windows
         def odds_only():
@@ -95,10 +100,10 @@ if __name__ == "__main__":
         schedule.every(2).hours.do(odds_only)
 
         # Run once immediately on start
-        run_pipeline(skip_box_scores=skip)
+        run_pipeline(skip_box_scores=skip, full_rebuild=rebuild)
 
         while True:
             schedule.run_pending()
             time.sleep(60)
     else:
-        run_pipeline(skip_box_scores=skip)
+        run_pipeline(skip_box_scores=skip, full_rebuild=rebuild)
