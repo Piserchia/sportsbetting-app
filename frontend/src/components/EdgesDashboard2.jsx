@@ -64,7 +64,7 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
   const fetchEdges = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`${API}/edges/best?limit=150&min_edge=${minEdge}`)
+    fetch(`${API}/edges/best?limit=1000&min_edge=${minEdge}`)
       .then(r => r.json())
       .then(data => { setEdges(data.edges || []); setLoading(false); })
       .catch(() => { setError("Failed to load edges"); setLoading(false); });
@@ -79,6 +79,11 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
       if (sortBy === "edge")  return b.edge_percent - a.edge_percent;
       if (sortBy === "prob")  return b.probability - a.probability;
       return 0;
+    })
+    .filter((e, _, arr) => {
+      // Keep only the best row per (player_id, stat) — already sorted so first seen wins
+      const key = `${e.player_id}|${e.stat}`;
+      return arr.findIndex(x => `${x.player_id}|${x.stat}` === key) === arr.indexOf(e);
     });
 
   const applyMinEdge = () => {
@@ -102,7 +107,7 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
         <div>
           <div style={{ color: T.text, fontSize: 18, fontWeight: 700 }}>Best Edges — Today</div>
           <div style={{ color: T.textSub, fontSize: 12, marginTop: 2 }}>
-            One line per prop · best book · ranked by bet score
+            One row per player/stat · best line · best book · ranked by bet score
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

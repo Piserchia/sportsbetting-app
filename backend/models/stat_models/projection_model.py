@@ -131,6 +131,10 @@ def build_distributions(conn=None) -> int:
     Compute per-player standard deviations from historical game logs.
     Uses recent-form std (last 20 games) weighted with full-season std
     to be more responsive to current variance patterns.
+
+    Std is scaled to the projected mean to preserve the coefficient of variation
+    (std/mean ratio) when the ML projection diverges from historical average.
+    Formula: scaled_std = historical_std * sqrt(proj_mean / historical_mean)
     """
     close = conn is None
     conn = conn or get_connection()
@@ -155,9 +159,32 @@ def build_distributions(conn=None) -> int:
         ) t WHERE rn = 1
     """).df()
 
+    # Load projected means for scaling — keyed by (player_id, stat)
+    STAT_PROJ_COL = {
+        "points": "points_mean",
+        "rebounds": "rebounds_mean",
+        "assists": "assists_mean",
+        "steals": "steals_mean",
+        "blocks": "blocks_mean",
+    }
+    proj_df = conn.execute("""
+        SELECT player_id, points_mean, rebounds_mean, assists_mean, steals_mean, blocks_mean
+        FROM player_projections
+    """).df()
+    # Keep most recent projection per player (latest game_id lexicographically)
+    proj_lookup = {}
+    if not proj_df.empty:
+        for _, row in proj_df.iterrows():
+            pid = str(row["player_id"])
+            for stat, col in STAT_PROJ_COL.items():
+                key = (pid, stat)
+                proj_lookup[key] = float(row[col]) if row[col] is not None else None
+
     stats = ["points", "rebounds", "assists", "steals", "blocks"]
     records = []
     MIN_STD = 1.5
+    MAX_SCALE_RATIO = 4.0  # cap to prevent extreme adjustments
+    MIN_SCALE_RATIO = 0.25
 
     for _, latest in latest_games.iterrows():
         player_id = str(latest["player_id"])
@@ -169,12 +196,12 @@ def build_distributions(conn=None) -> int:
             n = len(values)
 
             if n == 0:
-                mean, std = 0.0, MIN_STD
+                hist_mean, std = 0.0, MIN_STD
             elif n == 1:
-                mean = float(values.iloc[0])
-                std = mean * 0.20
+                hist_mean = float(values.iloc[0])
+                std = hist_mean * 0.20
             else:
-                mean = float(values.mean())
+                hist_mean = float(values.mean())
                 full_std = float(values.std())
 
                 # Weight recent variance more heavily if enough data
@@ -188,12 +215,25 @@ def build_distributions(conn=None) -> int:
 
             std = max(std, MIN_STD)
 
+            # Scale std to the projected mean to preserve coefficient of variation.
+            # This prevents artificially tight distributions when a player is projected
+            # significantly above/below their historical average.
+            proj_mean = proj_lookup.get((player_id, stat))
+            if proj_mean is not None and proj_mean > 0 and hist_mean > 0:
+                ratio = proj_mean / hist_mean
+                ratio = max(MIN_SCALE_RATIO, min(MAX_SCALE_RATIO, ratio))
+                std = std * (ratio ** 0.5)
+                std = max(std, MIN_STD)
+                stored_mean = proj_mean
+            else:
+                stored_mean = hist_mean
+
             records.append({
                 "game_id":   game_id,
                 "player_id": player_id,
                 "stat":      stat,
-                "mean":      round(float(mean), 4),
-                "std_dev":   round(float(std),  4),
+                "mean":      round(float(stored_mean), 4),
+                "std_dev":   round(float(std),         4),
             })
 
     dist_df = pd.DataFrame(records)

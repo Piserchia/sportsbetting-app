@@ -23,18 +23,38 @@ API key is in `config/.env` as `SPORTSGAMEODDS_API_KEY`.
 
 ## Documentation Maintenance Policy
 
-**Whenever code changes modify architecture, data flow, or database schema, the relevant context documentation must be updated.**
+**Documentation is part of every code change. Do not consider a task complete until all relevant docs are updated.**
+
+### Mandatory post-change checklist
+
+After any code change, explicitly ask: *"Does this change affect any of the following?"*
+
+- [ ] What a table column stores (meaning, not just type) → update `backend/database/SCHEMA.md` column description
+- [ ] How a module computes or transforms data → update the nearest `CONTEXT.md`
+- [ ] The data flow between pipeline stages → update `AI_CONTEXT.md` data flow diagram
+- [ ] The order, inputs, or outputs of pipeline steps → update `PIPELINE.md`
+- [ ] A new file, directory, or module → update `REPO_MAP.md` + `AI_CONTEXT.md`
+- [ ] An API endpoint (new, changed, or removed) → update `backend/api/CONTEXT.md`
+- [ ] A schema table or column (add/remove/rename) → update `backend/database/SCHEMA.md` + `backend/contracts/database_schema.yaml`
+- [ ] Simulation behavior (distributions, lines, fallbacks) → update `backend/models/CONTEXT.md`
+- [ ] A new frontend component → update `frontend/CONTEXT.md`
+
+If yes to any item above, update those docs **in the same response** as the code change — not as a follow-up.
+
+### Trigger table
 
 | Change | Update |
 |--------|--------|
 | New ingestion source | `backend/data_sources/` (relevant subdirectory) |
 | New feature group | `backend/features/CONTEXT.md` + `backend/models/CONTEXT.md` |
-| Table schema change | `backend/database/SCHEMA.md` |
+| Table schema change | `backend/database/SCHEMA.md` + `backend/contracts/database_schema.yaml` |
+| Column behavior change | `backend/database/SCHEMA.md` column description |
 | New/changed API endpoint | `backend/api/CONTEXT.md` |
 | Pipeline step added/reordered | `PIPELINE.md` |
 | Pipeline stage module change | `backend/pipeline/stages/` + `PIPELINE.md` |
 | New module or directory | `REPO_MAP.md` + `AI_CONTEXT.md` |
 | Simulation line changes | `backend/models/CONTEXT.md` (PROP_LINES) |
+| Simulation/distribution behavior | `backend/models/CONTEXT.md` + `AI_CONTEXT.md` data flow |
 | New frontend component | `frontend/CONTEXT.md` |
 | Schema contract change | `backend/contracts/` (relevant YAML file) |
 

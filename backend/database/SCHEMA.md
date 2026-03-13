@@ -204,8 +204,8 @@
 | **game_id** | TEXT | **PK** (composite) |
 | **player_id** | TEXT | **PK** |
 | **stat** | TEXT | **PK** — 'points', 'rebounds', 'assists', 'steals', 'blocks' |
-| mean | DOUBLE | |
-| std_dev | DOUBLE | |
+| mean | DOUBLE | Projected mean (from `player_projections`, not historical) |
+| std_dev | DOUBLE | Historical std scaled to projected mean via `sqrt(proj/hist)` to preserve CV |
 
 ### player_simulations
 | Column | Type | Notes |

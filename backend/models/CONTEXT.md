@@ -9,7 +9,7 @@ ML projections, Monte Carlo simulations, feature orchestration, and performance 
 | File | Purpose | Tables Written |
 |------|---------|---------------|
 | `feature_builder.py` | Orchestrates all feature groups | `player_features` |
-| `projection_model.py` | LightGBM stat projections | `player_projections`, `player_distributions` |
+| `projection_model.py` | LightGBM stat projections; `std_dev` in distributions is scaled to projected mean to preserve CV | `player_projections`, `player_distributions` |
 | `stat_models.py` | Position-specific LightGBM models | (used by projection_model) |
 | `simulation_engine.py` | Monte Carlo simulations | `player_simulations` |
 | `game_simulator.py` | Game-level correlated simulation | (experimental) |
@@ -19,9 +19,12 @@ ML projections, Monte Carlo simulations, feature orchestration, and performance 
 ## Simulation Engine Details
 
 - **10,000 Monte Carlo samples** per player per stat
-- **Distributions:** Gamma (points), Negative Binomial (rebounds, assists, steals, blocks)
-- **Combo props:** Gaussian copula preserving Spearman rank correlations
+- **Minutes-conditioned mixture:** For each draw, minutes are sampled first from `Normal(minutes_projection, max(proj * 0.18, 2.0))`, clamped to [8, 44]. Stat means and stds are then scaled to the simulated minutes: `stat_mean = rate × minutes_sim`, `stat_std = base_std × sqrt(minutes_sim / minutes_proj)`. This produces mixture distributions with fatter tails than single-distribution sampling, matching the real mechanism where minutes variability drives stat variability.
+- **Distributions:** Gamma (points), Negative Binomial (rebounds, assists, steals, blocks) — all parameterised per-draw from minutes-scaled means/stds
+- **Combo props:** Gaussian copula preserving Spearman rank correlations, with minutes-adjusted marginal parameters
 - **Minimum std_dev:** 1.5 (prevents degenerate distributions)
+- **Variance scaling (distributions table):** `std_dev` in `player_distributions` is scaled via `historical_std × sqrt(proj_mean / hist_mean)` to preserve the coefficient of variation when the ML projection diverges from the player's historical average. Scaling ratio is capped at [0.25×, 4×].
+- **Fallback:** If `minutes_projection` is 0 or missing, falls back to direct single-distribution sampling (v2 behavior)
 
 ### PROP_LINES (half-point values matching sportsbook conventions)
 
