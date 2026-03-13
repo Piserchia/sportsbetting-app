@@ -26,12 +26,13 @@ NBA API + SportsGameOdds API
         ▼
    ML Projections
   (LightGBM models → player_projections + player_distributions)
-  (player_distributions.std_dev is scaled to proj mean via sqrt(proj/hist) to preserve CV)
+  (player_distributions.std_dev stores raw historical std — variance scaling handled by simulation engine)
         │
         ▼
    Monte Carlo Simulation
-  (10k minutes-conditioned samples per player/stat with Gamma/NegBin/Copula → player_simulations)
-  (minutes drawn first → stat means/stds scaled per-draw → mixture distribution with fatter tails)
+  (10k samples per player/stat with Gamma/NegBin/Copula → player_simulations)
+  (minutes drawn first → only std scaled per-draw via sqrt(min_sim/min_proj) → fatter tails)
+  (mean is fixed from LightGBM — not rescaled by minutes to avoid double-counting)
         │
         ▼
    Edge Detection

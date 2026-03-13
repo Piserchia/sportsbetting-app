@@ -1,12 +1,12 @@
 """
 models/simulation_engine.py
-Monte Carlo simulation engine — v3 with minutes-conditioned mixture distributions.
+Monte Carlo simulation engine — v3 with minutes-conditioned variance.
 
-For each simulation draw, minutes are sampled first, then stat means and
-variances are scaled to the simulated minutes. This produces a mixture
-distribution with fatter tails than the v2 single-distribution approach,
-because high-minutes draws push stat means up and low-minutes draws push
-them down — matching real-world NBA stat generation.
+Minutes uncertainty is modelled by drawing simulated minutes per player,
+then scaling only the standard deviation (NOT the mean) by
+sqrt(minutes_sim / minutes_proj). This produces moderately fatter tails
+without shifting the distribution centre, since the LightGBM projection
+already incorporates minutes as an input feature.
 
 Distribution choices:
     Points    → Gamma  (right-skewed, better tail behavior than log-normal)
@@ -15,11 +15,10 @@ Distribution choices:
     Steals    → Negative Binomial
     Blocks    → Negative Binomial
 
-Minutes conditioning:
+Minutes conditioning (variance only):
     minutes_sim ~ Normal(minutes_projection, minutes_std)
-    per-minute rate = projected_stat / minutes_projection
-    stat_mean_sim  = rate * minutes_sim
-    stat_std_sim   = base_std * sqrt(minutes_sim / minutes_projection)
+    stat_mean   = projected mean (fixed, from LightGBM)
+    stat_std    = base_std * sqrt(minutes_sim / minutes_projection)
 
 For combo props (PRA, PR, PA) we use a Gaussian copula to preserve
 the correlation structure between stats while using marginal distributions
@@ -155,11 +154,9 @@ def _sim_negbin(
         return np.clip(rng.normal(mean, std, size), 0.0, None)
 
 
-# ── Minutes-conditioned simulation ─────────────────────────────────────────────
+# ── Minutes-conditioned variance scaling ───────────────────────────────────────
 
-MIN_MINUTES = 8.0
-MAX_MINUTES = 44.0
-MINUTES_CV  = 0.18   # coefficient of variation for minutes draws
+MINUTES_CV      = 0.18   # coefficient of variation for minutes draws
 MIN_MINUTES_STD = 2.0
 
 
@@ -168,9 +165,11 @@ def _sim_minutes(
     minutes_proj: float,
     size: int,
 ) -> np.ndarray:
-    """Draw simulated minutes from Normal(proj, std), clamped to [8, 44]."""
+    """Draw simulated minutes from Normal(proj, std), clamped relative to projection."""
     minutes_std = max(minutes_proj * MINUTES_CV, MIN_MINUTES_STD)
-    return np.clip(rng.normal(minutes_proj, minutes_std, size), MIN_MINUTES, MAX_MINUTES)
+    lower = max(12.0, minutes_proj * 0.65)
+    upper = min(42.0, minutes_proj * 1.35)
+    return np.clip(rng.normal(minutes_proj, minutes_std, size), lower, upper)
 
 
 def _sim_gamma_minutes(
@@ -182,26 +181,23 @@ def _sim_gamma_minutes(
 ) -> np.ndarray:
     """
     Minutes-conditioned Gamma samples (vectorized).
-    Each of the 10k draws uses its own minutes-scaled mean and std.
+    Mean is fixed (from LightGBM projection).  Only std varies per draw.
     """
     size = len(minutes_sim)
     if minutes_proj <= 0:
         return _sim_gamma(rng, mean, std, size)
 
-    rate = mean / minutes_proj                             # per-minute rate
-    means_sim = rate * minutes_sim                         # (size,)
+    # Scale std only — mean stays fixed to avoid double-counting minutes
     ratio = minutes_sim / minutes_proj                     # (size,)
     stds_sim = std * np.sqrt(np.clip(ratio, 0.25, 4.0))   # (size,)
 
-    # Vectorised Gamma: k = mean²/var, θ = var/mean — per element
-    means_sim = np.clip(means_sim, 0.5, None)
-    stds_sim  = np.clip(stds_sim, MIN_STD, None)
-    var_sim   = stds_sim ** 2
-    k_arr     = (means_sim ** 2) / var_sim
-    theta_arr = var_sim / means_sim
+    mean_val = max(mean, 0.5)
+    stds_sim = np.clip(stds_sim, MIN_STD, None)
+    var_sim  = stds_sim ** 2
+    k_arr    = (mean_val ** 2) / var_sim
+    theta_arr = var_sim / mean_val
 
     try:
-        # Draw from Gamma element-wise using shape/scale arrays
         samples = rng.gamma(shape=k_arr, scale=theta_arr)
         return np.clip(samples, 0.0, None)
     except Exception:
@@ -217,29 +213,26 @@ def _sim_negbin_minutes(
 ) -> np.ndarray:
     """
     Minutes-conditioned Negative Binomial samples (vectorized).
-    Uses Gamma-Poisson mixture for vectorised NegBin with per-element parameters.
+    Mean is fixed (from LightGBM projection).  Only std varies per draw.
+    Uses Gamma-Poisson mixture for vectorised NegBin with per-element std.
     """
     size = len(minutes_sim)
     if minutes_proj <= 0:
         return _sim_negbin(rng, mean, std, size)
 
-    rate = mean / minutes_proj
-    means_sim = np.clip(rate * minutes_sim, 0.5, None)     # (size,)
+    # Scale std only — mean stays fixed
+    mean_val = max(mean, 0.5)
     ratio = minutes_sim / minutes_proj
     stds_sim = np.clip(std * np.sqrt(np.clip(ratio, 0.25, 4.0)), MIN_STD, None)
     var_sim = stds_sim ** 2
 
     try:
-        # NegBin via Gamma-Poisson mixture (vectorised):
-        #   n = mean² / (var - mean) when var > mean, else Poisson-like
-        excess = var_sim - means_sim
-        # Where var <= mean, use large n (Poisson approximation)
+        excess = var_sim - mean_val
         poisson_mask = excess <= 0
-        n_arr = np.where(poisson_mask, 1000.0, (means_sim ** 2) / np.clip(excess, 1e-6, None))
+        n_arr = np.where(poisson_mask, 1000.0, (mean_val ** 2) / np.clip(excess, 1e-6, None))
         n_arr = np.clip(n_arr, 0.1, None)
 
-        # Gamma-Poisson: draw lambda ~ Gamma(n, mean/n), then X ~ Poisson(lambda)
-        gamma_scale = means_sim / n_arr
+        gamma_scale = mean_val / n_arr
         lambdas = rng.gamma(shape=n_arr, scale=gamma_scale)
         samples = rng.poisson(lam=np.clip(lambdas, 0.0, 500.0))
         return samples.astype(float)
@@ -375,27 +368,26 @@ def _build_covariance_matrix(player_logs: pd.DataFrame) -> np.ndarray:
 
 def simulate_player_props(conn=None) -> int:
     """
-    Run Monte Carlo simulations for all players using minutes-conditioned
-    mixture distributions.
+    Run Monte Carlo simulations for all players with minutes-conditioned
+    variance scaling.
 
     For each player, 10k minutes are drawn first. Then for each draw:
-        stat_mean = (projected_stat / minutes_proj) * simulated_minutes
+        stat_mean = projected mean (fixed — LightGBM already accounts for minutes)
         stat_std  = base_std * sqrt(simulated_minutes / minutes_proj)
 
-    This creates a mixture distribution with fatter tails than a single
-    parametric distribution, matching the real-world mechanism where
-    minutes variability drives stat variability.
+    This widens the distribution on high-minutes draws and narrows it on
+    low-minutes draws, producing moderately fatter tails without shifting
+    the distribution centre.
 
       Individual props:
-        - Points   via Gamma (minutes-conditioned)
-        - Rebounds via Negative Binomial (minutes-conditioned)
-        - Assists  via Negative Binomial (minutes-conditioned)
-        - Steals   via Negative Binomial (minutes-conditioned)
-        - Blocks   via Negative Binomial (minutes-conditioned)
+        - Points   via Gamma (variance-scaled)
+        - Rebounds via Negative Binomial (variance-scaled)
+        - Assists  via Negative Binomial (variance-scaled)
+        - Steals   via Negative Binomial (variance-scaled)
+        - Blocks   via Negative Binomial (variance-scaled)
 
       Combo props (PRA, PR, PA, SB):
         - Gaussian copula preserving Spearman rank correlations
-        - Minutes-adjusted marginal parameters
 
     Returns total simulation rows written.
     """
@@ -530,49 +522,17 @@ def simulate_player_props(conn=None) -> int:
                 })
 
         # ── Correlated combo props via Gaussian copula ────────────────────
-        # Combo props use the same minutes draw to preserve the minutes-driven
-        # correlation (high minutes → all stats up together).
         player_log_df = logs_by_player.get(player_id, pd.DataFrame())
         corr_matrix   = _build_correlation_matrix(player_log_df)
 
-        if minutes_sim is not None and min_proj > 0:
-            # Draw fresh minutes for combo (independent from individual props)
-            minutes_sim_c = _sim_minutes(rng, min_proj, SIMULATION_COUNT)
-            ratio_c = np.clip(minutes_sim_c / min_proj, 0.25, 4.0)
-            sqrt_ratio_c = np.sqrt(ratio_c)
-            # Compute per-sim means for copula marginals
-            combo_mean_pts = (mean_pts / min_proj) * minutes_sim_c
-            combo_mean_reb = (mean_reb / min_proj) * minutes_sim_c
-            combo_mean_ast = (mean_ast / min_proj) * minutes_sim_c
-            combo_std_pts = std_pts * sqrt_ratio_c
-            combo_std_reb = std_reb * sqrt_ratio_c
-            combo_std_ast = std_ast * sqrt_ratio_c
-            # Use the mean of the per-sim distributions for copula PPF
-            # (copula still uses fixed params — the minutes mixture is captured
-            #  by averaging over the per-sim conditional means)
-            avg_mean_pts = float(np.mean(combo_mean_pts))
-            avg_mean_reb = float(np.mean(combo_mean_reb))
-            avg_mean_ast = float(np.mean(combo_mean_ast))
-            avg_std_pts  = float(np.mean(combo_std_pts))
-            avg_std_reb  = float(np.mean(combo_std_reb))
-            avg_std_ast  = float(np.mean(combo_std_ast))
-            sim_pts_c, sim_reb_c, sim_ast_c = _correlated_combo_sims(
-                rng,
-                avg_mean_pts, avg_std_pts,
-                avg_mean_reb, avg_std_reb,
-                avg_mean_ast, avg_std_ast,
-                corr_matrix,
-                SIMULATION_COUNT,
-            )
-        else:
-            sim_pts_c, sim_reb_c, sim_ast_c = _correlated_combo_sims(
-                rng,
-                mean_pts, std_pts,
-                mean_reb, std_reb,
-                mean_ast, std_ast,
-                corr_matrix,
-                SIMULATION_COUNT,
-            )
+        sim_pts_c, sim_reb_c, sim_ast_c = _correlated_combo_sims(
+            rng,
+            mean_pts, std_pts,
+            mean_reb, std_reb,
+            mean_ast, std_ast,
+            corr_matrix,
+            SIMULATION_COUNT,
+        )
 
         sim_pra = sim_pts_c + sim_reb_c + sim_ast_c
         sim_pr  = sim_pts_c + sim_reb_c
@@ -645,6 +605,14 @@ def simulate_player_props(conn=None) -> int:
         "INSERT OR REPLACE INTO ingestion_log VALUES (?,?,?,?,?,?,current_timestamp)",
         [str(uuid.uuid4()), "simulation", "player_simulations", n_sim, "success", ""]
     )
+
+    # ── Post-simulation sanity checks ──────────────────────────────────
+    try:
+        from backend.pipeline.simulations.simulation_validation import validate_simulations
+        validate_simulations(conn, proj_means)
+    except Exception as e:
+        logger.warning(f"  Simulation validation failed: {e}")
+
     if close:
         conn.close()
     return n_sim

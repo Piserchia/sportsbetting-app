@@ -19,12 +19,13 @@ ML projections, Monte Carlo simulations, feature orchestration, and performance 
 ## Simulation Engine Details
 
 - **10,000 Monte Carlo samples** per player per stat
-- **Minutes-conditioned mixture:** For each draw, minutes are sampled first from `Normal(minutes_projection, max(proj * 0.18, 2.0))`, clamped to [8, 44]. Stat means and stds are then scaled to the simulated minutes: `stat_mean = rate × minutes_sim`, `stat_std = base_std × sqrt(minutes_sim / minutes_proj)`. This produces mixture distributions with fatter tails than single-distribution sampling, matching the real mechanism where minutes variability drives stat variability.
-- **Distributions:** Gamma (points), Negative Binomial (rebounds, assists, steals, blocks) — all parameterised per-draw from minutes-scaled means/stds
-- **Combo props:** Gaussian copula preserving Spearman rank correlations, with minutes-adjusted marginal parameters
+- **Minutes-conditioned variance:** For each draw, minutes are sampled from `Normal(minutes_projection, max(proj * 0.18, 2.0))`, clamped to `[max(12, proj*0.65), min(42, proj*1.35)]`. Only the **standard deviation** is scaled per-draw: `stat_std = base_std × sqrt(minutes_sim / minutes_proj)`. The **mean is fixed** from the LightGBM projection (not rescaled by minutes, since LightGBM already uses minutes as an input feature).
+- **Distributions:** Gamma (points), Negative Binomial (rebounds, assists, steals, blocks)
+- **Combo props:** Gaussian copula preserving Spearman rank correlations (uses projected mean/std directly, not minutes-adjusted)
 - **Minimum std_dev:** 1.5 (prevents degenerate distributions)
-- **Variance scaling (distributions table):** `std_dev` in `player_distributions` is scaled via `historical_std × sqrt(proj_mean / hist_mean)` to preserve the coefficient of variation when the ML projection diverges from the player's historical average. Scaling ratio is capped at [0.25×, 4×].
-- **Fallback:** If `minutes_projection` is 0 or missing, falls back to direct single-distribution sampling (v2 behavior)
+- **Distribution table:** `player_distributions.std_dev` stores raw historical std (60% recent + 40% full-season). No projection-based scaling — avoids compounding with minutes-conditioning.
+- **Fallback:** If `minutes_projection` is 0 or missing, falls back to direct single-distribution sampling
+- **Validation:** Post-simulation checks verify mean consistency (<10% drift), std bounds, probability range [0.001, 0.999], and tail behavior. Results logged to `ingestion_log`.
 
 ### PROP_LINES (half-point values matching sportsbook conventions)
 

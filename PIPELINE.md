@@ -22,7 +22,7 @@ Orchestrated by `scripts/run_pipeline.py`, which calls stage modules in `backend
 | 9 | `sync_game_logs()` | `build_features.py` | `stage_02_game_logs` | `player_game_logs` | Normalize box scores into clean game log format |
 | 10 | `build_player_features()` | `build_features.py` | `stage_03_features` | `player_features` | 50+ rolling/context features per (game, player) |
 | 11 | `generate_projections()` | `run_projections.py` | `stage_04_projections` | `player_projections`, `player_distributions`, `projection_explanations` | LightGBM stat predictions + distribution params (std scaled to proj mean via `sqrt(proj/hist)`) + SHAP explanations |
-| 12 | `simulate_player_props()` | `simulate_props.py` | `stage_06_simulations` | `player_simulations` | 10k minutes-conditioned Monte Carlo sims → P(stat >= line) for each prop line. Minutes drawn from Normal(proj, 18% CV), then stat means/stds scaled per-draw to create mixture distributions with fatter tails. |
+| 12 | `simulate_player_props()` | `simulate_props.py` | `stage_06_simulations` | `player_simulations` | 10k Monte Carlo sims with minutes-conditioned variance → P(stat >= line). Minutes drawn from Normal(proj, 18% CV) with projection-relative clamp [65%-135%]. Mean fixed from LightGBM; only std scaled by sqrt(min_sim/min_proj). Post-simulation validation checks run automatically. |
 | 13 | `calculate_edges()` | `calculate_edges.py` | `stage_06_edges` / `stage_07_edges` | `prop_edges` | Compare model probability vs sportsbook implied probability |
 
 ## Scheduling (via `--schedule` flag)

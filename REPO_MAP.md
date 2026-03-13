@@ -50,7 +50,8 @@ sportsbetting-app/
 │   │   │   └── stage_07_edges.py        # Edge post-processing / aggregation
 │   │   └── simulations/
 │   │       ├── simulation_engine.py     # Monte Carlo (Gamma/NegBin/Copula) → player_simulations
-│   │       └── game_simulator.py        # Game-level correlated simulation
+│   │       ├── simulation_validation.py # Post-simulation sanity checks (mean drift, std bounds, tail checks)
+│   │       └── game_simulator.py        # Game-level correlated simulation (experimental, unused)
 │   │
 │   ├── contracts/
 │   │   ├── database_schema.yaml     # Database table schema contracts
@@ -65,7 +66,8 @@ sportsbetting-app/
 │   │   └── SCHEMA.md               # Database schema documentation
 │   │
 │   ├── analysis/
-│   │   └── queries.py               # Reusable analytical SQL queries
+│   │   ├── queries.py               # Reusable analytical SQL queries
+│   │   └── calibration.py           # Probability calibration evaluation (bucket hit rates)
 │   │
 │   ├── ingestion/                   # (compat shim — re-exports from data_sources/)
 │   │
