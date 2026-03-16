@@ -253,6 +253,15 @@ def ingest_schedule(seasons: Optional[list] = None, conn=None) -> int:
                 home_team_id = int(row.get("homeTeam_teamId", 0)) or abbr_to_id.get(home_abbr)
                 away_team_id = int(row.get("awayTeam_teamId", 0)) or abbr_to_id.get(away_abbr)
 
+                # Extract game time in ET from the datetime string
+                game_time_et = None
+                try:
+                    game_dt = pd.to_datetime(raw_date)
+                    if game_dt.hour != 0 or game_dt.minute != 0:
+                        game_time_et = game_dt.strftime("%-I:%M %p ET")
+                except Exception:
+                    pass
+
                 home_score_raw = row.get("homeTeam_score")
                 away_score_raw = row.get("awayTeam_score")
                 home_score = int(home_score_raw) if pd.notna(home_score_raw) and home_score_raw else None
@@ -262,19 +271,20 @@ def ingest_schedule(seasons: Optional[list] = None, conn=None) -> int:
                     INSERT INTO games
                         (game_id, season, game_date, home_team_id, away_team_id,
                          home_team_abbr, away_team_abbr, home_score, away_score,
-                         status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+                         status, game_time_et, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
                     ON CONFLICT (game_id) DO UPDATE SET
-                        status     = excluded.status,
-                        home_score = excluded.home_score,
-                        away_score = excluded.away_score,
-                        updated_at = now()
+                        status       = excluded.status,
+                        home_score   = excluded.home_score,
+                        away_score   = excluded.away_score,
+                        game_time_et = COALESCE(excluded.game_time_et, games.game_time_et),
+                        updated_at   = now()
                 """, [
                     game_id, season, game_date,
                     home_team_id, away_team_id,
                     home_abbr, away_abbr,
                     home_score, away_score,
-                    status_str,
+                    status_str, game_time_et,
                 ])
                 records += 1
 
@@ -300,29 +310,57 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
     Fetches traditional box scores for all Final games in a given season.
     This is slow (1 API call per game) — use limit for testing.
 
+    Only ingests box scores for games that are:
+      - status = 'Final'
+      - game_date < today  (prevents ingesting live or same-day games)
+
     Args:
-        force: If True, re-fetches ALL games in the season ignoring what's
+        force: If True, re-fetches ALL eligible Final games ignoring what's
                already in player_game_stats. Use when box scores are missing
                despite the game appearing as already ingested.
     """
     close = conn is None
     conn = conn or get_connection()
+    today = date.today()
 
     if force:
         logger.info(f"  FORCE mode — fetching ALL Final games for {season} regardless of existing data.")
         games_df = conn.execute("""
-            SELECT game_id FROM games
-            WHERE season = ? AND status = 'Final'
-        """, [season]).df()
+            SELECT game_id, game_date FROM games
+            WHERE season = ? AND status = 'Final' AND game_date < ?
+        """, [season, today]).df()
     else:
         games_df = conn.execute("""
-            SELECT game_id FROM games
-            WHERE season = ? AND status = 'Final'
+            SELECT game_id, game_date FROM games
+            WHERE season = ? AND status = 'Final' AND game_date < ?
             AND game_id NOT IN (
                 SELECT DISTINCT game_id FROM player_game_stats
                 WHERE season = ?
             )
-        """, [season, season]).df()
+        """, [season, today, season]).df()
+
+    # Log counts of games skipped at the query level for visibility
+    skipped_today = conn.execute("""
+        SELECT COUNT(*) FROM games
+        WHERE season = ? AND status = 'Final' AND game_date >= ?
+    """, [season, today]).fetchone()[0]
+    skipped_not_final = conn.execute("""
+        SELECT COUNT(*) FROM games
+        WHERE season = ? AND status != 'Final'
+    """, [season]).fetchone()[0]
+    if not force:
+        already_ingested = conn.execute("""
+            SELECT COUNT(DISTINCT game_id) FROM player_game_stats WHERE season = ?
+        """, [season]).fetchone()[0]
+    else:
+        already_ingested = 0
+
+    if skipped_today > 0:
+        logger.info(f"Skipping {skipped_today} game(s) for {season}: reason=game_today (game_date >= {today})")
+    if skipped_not_final > 0:
+        logger.info(f"Skipping {skipped_not_final} game(s) for {season}: reason=game_not_final")
+    if already_ingested > 0 and not force:
+        logger.info(f"Skipping {already_ingested} game(s) for {season}: reason=already_ingested")
 
     if limit:
         games_df = games_df.head(limit)
@@ -462,6 +500,19 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
 
     _log_ingestion(conn, "nba_api", f"box_scores:{season}", player_records + team_records, "success")
     logger.info(f"  → {player_records} player stat rows, {team_records} team stat rows.")
+
+    # Safety check: verify no non-Final game stats were written
+    non_final_count = conn.execute("""
+        SELECT COUNT(*)
+        FROM player_game_stats p
+        JOIN games g ON p.game_id = g.game_id
+        WHERE g.status != 'Final'
+    """).fetchone()[0]
+    if non_final_count > 0:
+        logger.warning(
+            f"  DATA INTEGRITY WARNING: {non_final_count} player_game_stats row(s) exist for non-Final games. "
+            "These may corrupt model training data."
+        )
 
     if close:
         conn.close()

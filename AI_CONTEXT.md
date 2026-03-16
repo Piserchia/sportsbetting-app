@@ -21,7 +21,7 @@ NBA API + SportsGameOdds API
         │
         ▼
    Feature Engineering
-  (rolling stats, minutes, pace, defense, usage, lineup context → player_features)
+  (Bayesian shrinkage → rolling stats, minutes, pace, defense, usage, lineup context → player_features)
         │
         ▼
    ML Projections
@@ -37,6 +37,12 @@ NBA API + SportsGameOdds API
         ▼
    Edge Detection
   (model probability vs sportsbook implied probability → prop_edges)
+  (qualifying edges logged to model_recommendations with player_position + opponent_team)
+        │
+        ▼
+   Bet Tracking & Analytics
+  (update_bet_results resolves pending bets → win/loss/push)
+  (performance analytics by stat type, player position, and stat×position matrix)
         │
         ▼
    FastAPI → React Dashboard

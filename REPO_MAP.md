@@ -23,6 +23,7 @@ sportsbetting-app/
 │   │   └── lineup_features.py       # Teammate on/off impact
 │   │
 │   ├── models/
+│   │   ├── bayesian_shrinkage.py    # Hierarchical Bayesian shrinkage → player_stat_posteriors
 │   │   ├── feature_builder.py       # Orchestrates all feature groups → player_features
 │   │   ├── clv_tracker.py           # Closing Line Value + bet result tracking
 │   │   ├── edges_query.py           # Edge aggregation queries
@@ -59,7 +60,7 @@ sportsbetting-app/
 │   │   └── projection_schema.yaml   # Projection output contracts
 │   │
 │   ├── api/
-│   │   └── app.py                   # FastAPI server (all REST endpoints + projection explanations)
+│   │   └── app.py                   # FastAPI server (all REST endpoints + projection explanations + bet analytics by type/position)
 │   │
 │   ├── database/
 │   │   ├── connection.py            # DuckDB connection + schema init (21 tables)
@@ -86,6 +87,7 @@ sportsbetting-app/
 │   ├── calculate_edges.py           # CLI: Edge detection
 │   ├── backtest_model.py            # Model backtesting (Brier, log loss, hit rate)
 │   ├── track_clv.py                 # CLV evaluation
+│   ├── update_bet_results.py        # Resolve pending bets against actual game results
 │   ├── train_minutes_model.py       # Minutes model training
 │   ├── init_db.py                   # Database schema initialization
 │   └── start_api.py                 # Start FastAPI server
@@ -98,7 +100,8 @@ sportsbetting-app/
 │           ├── ProjectionDebugger.jsx # SHAP feature contribution explainer
 │           ├── PipelineExplorer.jsx  # Visual pipeline education page
 │           ├── EdgesDashboard.jsx    # Best +EV edges across today's slate
-│           └── PipelineStatus.jsx    # Pipeline monitoring dashboard
+│           ├── PipelineStatus.jsx    # Pipeline monitoring dashboard
+│           └── BetPerformanceDashboard.jsx # Bet tracking: performance cards, recent bets, model comparison
 │
 ├── config/
 │   ├── .env                         # API keys, DB path, ingestion settings

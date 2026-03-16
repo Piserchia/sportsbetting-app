@@ -25,7 +25,26 @@ def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(db_path), read_only=read_only)
+    if not read_only:
+        _run_migrations(conn)
     return conn
+
+
+def _run_migrations(conn: duckdb.DuckDBPyConnection):
+    """Lightweight migrations for schema additions."""
+    try:
+        conn.execute("ALTER TABLE games ADD COLUMN game_time_et VARCHAR")
+    except Exception:
+        pass
+
+    # Migrate player_features: replace *_avg_last_5 with *_recent_adj
+    try:
+        cols = [r[0] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='player_features'").fetchall()]
+        if "points_avg_last_5" in cols:
+            logger.info("Migrating player_features: dropping *_avg_last_5, adding *_recent_adj...")
+            conn.execute("DROP TABLE IF EXISTS player_features")
+    except Exception:
+        pass
 
 
 def init_schema(conn: duckdb.DuckDBPyConnection):
@@ -69,6 +88,7 @@ def init_schema(conn: duckdb.DuckDBPyConnection):
             home_score      INTEGER,
             away_score      INTEGER,
             status          VARCHAR,   -- 'Final', 'Live', 'Upcoming'
+            game_time_et    VARCHAR,   -- e.g. '7:30 PM ET'
             updated_at      TIMESTAMP DEFAULT current_timestamp
         )
     """)
@@ -186,20 +206,20 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         CREATE TABLE IF NOT EXISTS player_features (
             game_id                     TEXT,
             player_id                   TEXT,
-            -- Rolling stat averages
-            points_avg_last_5           DOUBLE,
+            -- Rolling stat averages (EWMA + regression-to-mean adjusted)
+            points_recent_adj           DOUBLE,
             points_avg_last_10          DOUBLE,
-            rebounds_avg_last_5         DOUBLE,
+            rebounds_recent_adj         DOUBLE,
             rebounds_avg_last_10        DOUBLE,
-            assists_avg_last_5          DOUBLE,
+            assists_recent_adj          DOUBLE,
             assists_avg_last_10         DOUBLE,
             season_avg_points           DOUBLE,
             season_avg_rebounds         DOUBLE,
             season_avg_assists          DOUBLE,
-            -- Steals / Blocks rolling averages
-            steals_avg_last_5           DOUBLE,
+            -- Steals / Blocks (EWMA + regression-to-mean adjusted)
+            steals_recent_adj           DOUBLE,
             steals_avg_last_10          DOUBLE,
-            blocks_avg_last_5           DOUBLE,
+            blocks_recent_adj           DOUBLE,
             blocks_avg_last_10          DOUBLE,
             season_avg_steals           DOUBLE,
             season_avg_blocks           DOUBLE,
@@ -231,6 +251,12 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             -- Usage
             usage_proxy                 DOUBLE,
             usage_trend_last_5          DOUBLE,
+            -- Bayesian shrinkage posteriors
+            points_posterior            DOUBLE,
+            rebounds_posterior           DOUBLE,
+            assists_posterior            DOUBLE,
+            steals_posterior             DOUBLE,
+            blocks_posterior             DOUBLE,
             PRIMARY KEY (game_id, player_id)
         )
     """)
@@ -304,18 +330,18 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         CREATE TABLE IF NOT EXISTS player_features (
             game_id                     TEXT,
             player_id                   TEXT,
-            points_avg_last_5           DOUBLE,
+            points_recent_adj           DOUBLE,
             points_avg_last_10          DOUBLE,
-            rebounds_avg_last_5         DOUBLE,
+            rebounds_recent_adj         DOUBLE,
             rebounds_avg_last_10        DOUBLE,
-            assists_avg_last_5          DOUBLE,
+            assists_recent_adj          DOUBLE,
             assists_avg_last_10         DOUBLE,
             season_avg_points           DOUBLE,
             season_avg_rebounds         DOUBLE,
             season_avg_assists          DOUBLE,
-            steals_avg_last_5           DOUBLE,
+            steals_recent_adj           DOUBLE,
             steals_avg_last_10          DOUBLE,
-            blocks_avg_last_5           DOUBLE,
+            blocks_recent_adj           DOUBLE,
             blocks_avg_last_10          DOUBLE,
             season_avg_steals           DOUBLE,
             season_avg_blocks           DOUBLE,
@@ -342,14 +368,19 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             defense_adj_blk             DOUBLE,
             usage_proxy                 DOUBLE,
             usage_trend_last_5          DOUBLE,
+            points_posterior            DOUBLE,
+            rebounds_posterior           DOUBLE,
+            assists_posterior            DOUBLE,
+            steals_posterior             DOUBLE,
+            blocks_posterior             DOUBLE,
             PRIMARY KEY (game_id, player_id)
         )
     """)
 
     # Add new columns to existing tables without dropping them
     new_feature_cols = [
-        ("rebounds_avg_last_5",         "DOUBLE",  "0.0"),
-        ("assists_avg_last_5",           "DOUBLE",  "0.0"),
+        ("rebounds_recent_adj",         "DOUBLE",  "0.0"),
+        ("assists_recent_adj",           "DOUBLE",  "0.0"),
         ("season_avg_rebounds",          "DOUBLE",  "0.0"),
         ("season_avg_assists",           "DOUBLE",  "0.0"),
         ("minutes_avg_last_5",           "DOUBLE",  "0.0"),
@@ -394,6 +425,11 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
         ("usage_delta_teammate_out",      "DOUBLE",  "0.0"),
         ("assist_delta_teammate_out",     "DOUBLE",  "0.0"),
         ("rebound_delta_teammate_out",    "DOUBLE",  "0.0"),
+        ("points_posterior",              "DOUBLE",  "0.0"),
+        ("rebounds_posterior",            "DOUBLE",  "0.0"),
+        ("assists_posterior",             "DOUBLE",  "0.0"),
+        ("steals_posterior",              "DOUBLE",  "0.0"),
+        ("blocks_posterior",              "DOUBLE",  "0.0"),
     ]
     existing_cols = {
         row[0]: row[1] for row in conn.execute(
@@ -510,5 +546,91 @@ def init_model_schema(conn: duckdb.DuckDBPyConnection):
             contribution    DOUBLE
         )
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_feature_importance (
+            stat            TEXT,
+            position_group  TEXT,
+            feature         TEXT,
+            importance      DOUBLE,
+            model_version   TEXT,
+            created_at      TIMESTAMP DEFAULT current_timestamp,
+            PRIMARY KEY (stat, position_group, feature)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_stat_posteriors (
+            player_id       TEXT,
+            stat            TEXT,
+            posterior_mean  DOUBLE,
+            player_mean     DOUBLE,
+            prior_mean      DOUBLE,
+            n_games         INTEGER,
+            position_group  TEXT,
+            created_at      TIMESTAMP DEFAULT current_timestamp,
+            PRIMARY KEY (player_id, stat)
+        )
+    """)
+
+    # Add generated_at to player_projections if missing
+    try:
+        conn.execute("ALTER TABLE player_projections ADD COLUMN generated_at TIMESTAMP")
+    except Exception:
+        pass
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_versions (
+            version         TEXT PRIMARY KEY,
+            created_at      TIMESTAMP DEFAULT current_timestamp,
+            git_commit      TEXT,
+            training_games  INTEGER,
+            notes           TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_recommendations (
+            bet_id                  TEXT PRIMARY KEY,
+            timestamp_generated     TIMESTAMP,
+            model_version           TEXT,
+            game_id                 TEXT,
+            player_id               INTEGER,
+            player_name             TEXT,
+            team                    TEXT,
+            stat                    TEXT,
+            line                    DOUBLE,
+            sportsbook              TEXT,
+            odds                    INTEGER,
+            model_probability       DOUBLE,
+            edge_percent            DOUBLE,
+            confidence_score        DOUBLE,
+            closing_line            DOUBLE,
+            closing_odds            INTEGER,
+            actual_stat             DOUBLE,
+            result                  TEXT
+        )
+    """)
+    # Add new columns if missing
+    try:
+        mr_cols = {
+            row[0] for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'model_recommendations'"
+            ).fetchall()
+        }
+        for col_name, col_type in [("player_position", "TEXT"), ("opponent_team", "TEXT")]:
+            if col_name not in mr_cols:
+                conn.execute(f"ALTER TABLE model_recommendations ADD COLUMN {col_name} {col_type}")
+    except Exception:
+        pass
+
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mr_game_id ON model_recommendations(game_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mr_player_id ON model_recommendations(player_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mr_timestamp ON model_recommendations(timestamp_generated)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mr_position ON model_recommendations(player_position)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mr_stat ON model_recommendations(stat)")
+    except Exception:
+        pass
 
     logger.info("Model schema initialization complete.")

@@ -29,6 +29,7 @@ from backend.models.positional_defense_features import build_positional_defense_
 from backend.models.advanced_defense_features import build_advanced_defense_features
 from backend.models.lineup_features import build_lineup_features
 from backend.data_sources.injuries.injury_lineup_ingestor import get_teammate_injury_multipliers
+from backend.models.bayesian_shrinkage import compute_player_posteriors
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,38 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
     logger.info(f"Building features for {n_players} players across {len(logs)} game logs...")
 
     # ── 2. Rolling stat features ─────────────────────────────────────────────
-    logger.info("  Computing rolling stat features...")
+    #   EWMA replaces raw last-5 averages to reduce streak overfitting.
+    #   Weights: [0.40, 0.25, 0.15, 0.10, 0.06, 0.04] (most recent first).
+    #   recent_adj = season_avg + clip(ewma - season_avg, -6, +6).
+    logger.info("  Computing rolling stat features (EWMA + regression-to-mean)...")
     stat_records = []
+
+    EWMA_WEIGHTS = [0.40, 0.25, 0.15, 0.10, 0.06, 0.04]
+    DELTA_CLIP = 6.0
+
+    def _ewma(series, idx):
+        """Compute EWMA using up to 6 games BEFORE position idx (excludes current game)."""
+        end = idx                  # exclude current game
+        if end <= 0:
+            return None            # no prior games available
+        start = max(0, end - len(EWMA_WEIGHTS))
+        window = series.iloc[start:end].values[::-1]  # most recent prior game first
+        weights = EWMA_WEIGHTS[:len(window)]
+        w_sum = sum(weights)
+        return sum(w * float(v) for w, v in zip(weights, window)) / w_sum
+
+    def _recent_adj(ewma_val, season_val, stat_name, player_id):
+        """Regression-to-mean clipping: season_avg + clip(ewma - season_avg, -6, +6)."""
+        delta = ewma_val - season_val
+        if abs(delta) > DELTA_CLIP:
+            logger.debug(
+                "Recent performance spike detected: %s delta clipped "
+                "(player=%s raw_delta=%.2f clipped=%.1f)",
+                stat_name, player_id, delta,
+                max(-DELTA_CLIP, min(DELTA_CLIP, delta)),
+            )
+        clipped = max(-DELTA_CLIP, min(DELTA_CLIP, delta))
+        return season_val + clipped
 
     for player_id, player_logs in logs.groupby("player_id"):
         player_logs = player_logs.sort_values("game_date").reset_index(drop=True)
@@ -111,45 +142,101 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         stl  = player_logs["steals"].fillna(0)
         blk  = player_logs["blocks"].fillna(0)
 
-        points_avg_last_5   = pts.rolling(5,  min_periods=1).mean()
-        points_avg_last_10  = pts.rolling(10, min_periods=1).mean()
-        rebounds_avg_last_5 = reb.rolling(5,  min_periods=1).mean()
-        rebounds_avg_last_10 = reb.rolling(10, min_periods=1).mean()
-        assists_avg_last_5  = ast.rolling(5,  min_periods=1).mean()
-        assists_avg_last_10 = ast.rolling(10, min_periods=1).mean()
-        steals_avg_last_5   = stl.rolling(5,  min_periods=1).mean()
-        steals_avg_last_10  = stl.rolling(10, min_periods=1).mean()
-        blocks_avg_last_5   = blk.rolling(5,  min_periods=1).mean()
-        blocks_avg_last_10  = blk.rolling(10, min_periods=1).mean()
-        season_avg_points   = pts.expanding().mean()
-        season_avg_rebounds = reb.expanding().mean()
-        season_avg_assists  = ast.expanding().mean()
-        season_avg_steals   = stl.expanding().mean()
-        season_avg_blocks   = blk.expanding().mean()
+        # .shift(1) excludes current game — features only use past games
+        points_avg_last_10   = pts.shift(1).rolling(10, min_periods=1).mean()
+        rebounds_avg_last_10 = reb.shift(1).rolling(10, min_periods=1).mean()
+        assists_avg_last_10  = ast.shift(1).rolling(10, min_periods=1).mean()
+        steals_avg_last_10   = stl.shift(1).rolling(10, min_periods=1).mean()
+        blocks_avg_last_10   = blk.shift(1).rolling(10, min_periods=1).mean()
+        season_avg_points    = pts.shift(1).expanding().mean()
+        season_avg_rebounds  = reb.shift(1).expanding().mean()
+        season_avg_assists   = ast.shift(1).expanding().mean()
+        season_avg_steals    = stl.shift(1).expanding().mean()
+        season_avg_blocks    = blk.shift(1).expanding().mean()
+
+        stat_series = {
+            "points": pts, "rebounds": reb, "assists": ast,
+            "steals": stl, "blocks": blk,
+        }
+        season_series = {
+            "points": season_avg_points, "rebounds": season_avg_rebounds,
+            "assists": season_avg_assists, "steals": season_avg_steals,
+            "blocks": season_avg_blocks,
+        }
+        l10_series = {
+            "points": points_avg_last_10, "rebounds": rebounds_avg_last_10,
+            "assists": assists_avg_last_10, "steals": steals_avg_last_10,
+            "blocks": blocks_avg_last_10,
+        }
 
         for i, row in player_logs.iterrows():
-            stat_records.append({
-                "game_id":               row["game_id"],
-                "player_id":             str(player_id),
-                "points_avg_last_5":     round(float(points_avg_last_5.iloc[i]),   4),
-                "points_avg_last_10":    round(float(points_avg_last_10.iloc[i]),  4),
-                "rebounds_avg_last_5":   round(float(rebounds_avg_last_5.iloc[i]), 4),
-                "rebounds_avg_last_10":  round(float(rebounds_avg_last_10.iloc[i]),4),
-                "assists_avg_last_5":    round(float(assists_avg_last_5.iloc[i]),  4),
-                "assists_avg_last_10":   round(float(assists_avg_last_10.iloc[i]), 4),
-                "steals_avg_last_5":     round(float(steals_avg_last_5.iloc[i]),   4),
-                "steals_avg_last_10":    round(float(steals_avg_last_10.iloc[i]),  4),
-                "blocks_avg_last_5":     round(float(blocks_avg_last_5.iloc[i]),   4),
-                "blocks_avg_last_10":    round(float(blocks_avg_last_10.iloc[i]),  4),
-                "season_avg_points":     round(float(season_avg_points.iloc[i]),   4),
-                "season_avg_rebounds":   round(float(season_avg_rebounds.iloc[i]), 4),
-                "season_avg_assists":    round(float(season_avg_assists.iloc[i]),  4),
-                "season_avg_steals":     round(float(season_avg_steals.iloc[i]),   4),
-                "season_avg_blocks":     round(float(season_avg_blocks.iloc[i]),   4),
-            })
+            record = {
+                "game_id":   row["game_id"],
+                "player_id": str(player_id),
+            }
+            for stat_name in ["points", "rebounds", "assists", "steals", "blocks"]:
+                ewma_val   = _ewma(stat_series[stat_name], i)
+                season_val = season_series[stat_name].iloc[i]
+                l10_val    = l10_series[stat_name].iloc[i]
+
+                # First game: no prior data — use 0.0 as placeholder
+                if ewma_val is None or pd.isna(season_val):
+                    record[f"{stat_name}_recent_adj"]   = 0.0
+                    record[f"{stat_name}_avg_last_10"]  = 0.0 if pd.isna(l10_val) else round(float(l10_val), 4)
+                    record[f"season_avg_{stat_name}"]   = 0.0 if pd.isna(season_val) else round(float(season_val), 4)
+                else:
+                    adj_val = _recent_adj(ewma_val, float(season_val), stat_name, player_id)
+                    record[f"{stat_name}_recent_adj"]   = round(adj_val, 4)
+                    record[f"{stat_name}_avg_last_10"]  = round(float(l10_val), 4) if not pd.isna(l10_val) else 0.0
+                    record[f"season_avg_{stat_name}"]   = round(float(season_val), 4)
+
+            stat_records.append(record)
 
     base_df = pd.DataFrame(stat_records)
     logger.info(f"  → {len(base_df)} base stat feature rows")
+
+    # ── Guardrail: verify no leakage (first game per player should have 0s) ──
+    first_games = base_df.groupby("player_id").first()
+    leaked = first_games[first_games["points_recent_adj"] != 0.0]
+    if not leaked.empty:
+        raise RuntimeError(
+            f"FEATURE LEAKAGE DETECTED: {len(leaked)} players have non-zero "
+            f"recent_adj on their first game. This indicates the EWMA window "
+            f"includes the current game."
+        )
+    logger.info("  ✓ Leakage guardrail passed (first-game features are zero)")
+
+    # ── 2b. Bayesian shrinkage posteriors ─────────────────────────────────────
+    logger.info("  Computing Bayesian shrinkage posteriors...")
+    try:
+        posteriors = compute_player_posteriors(conn=conn)
+        if not posteriors.empty:
+            # Pivot posteriors: one row per player with {stat}_posterior columns
+            posterior_wide = posteriors.pivot(
+                index="player_id", columns="stat", values="posterior_mean"
+            ).reset_index()
+            posterior_wide.columns = [
+                f"{c}_posterior" if c != "player_id" else c
+                for c in posterior_wide.columns
+            ]
+            posterior_wide["player_id"] = posterior_wide["player_id"].astype(str)
+            base_df["player_id"] = base_df["player_id"].astype(str)
+            base_df = base_df.merge(posterior_wide, on="player_id", how="left")
+            for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
+                col = f"{stat}_posterior"
+                if col not in base_df.columns:
+                    base_df[col] = 0.0
+                else:
+                    base_df[col] = base_df[col].fillna(0.0)
+            logger.info(f"  → Bayesian posteriors merged for {len(posterior_wide)} players")
+        else:
+            for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
+                base_df[f"{stat}_posterior"] = 0.0
+            logger.info("  → No posteriors computed — using 0.0 defaults")
+    except Exception as e:
+        logger.warning(f"  Bayesian shrinkage failed: {e} — using 0.0 defaults")
+        for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
+            base_df[f"{stat}_posterior"] = 0.0
 
     # ── 3. Improved minutes features ─────────────────────────────────────────
     logger.info("  Computing minutes features...")
@@ -348,11 +435,11 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
     # ── 8. Write to DB ───────────────────────────────────────────────────────
     expected_cols = [
         "game_id", "player_id",
-        "points_avg_last_5",  "points_avg_last_10",
-        "rebounds_avg_last_5", "rebounds_avg_last_10",
-        "assists_avg_last_5",  "assists_avg_last_10",
-        "steals_avg_last_5",   "steals_avg_last_10",
-        "blocks_avg_last_5",   "blocks_avg_last_10",
+        "points_recent_adj",  "points_avg_last_10",
+        "rebounds_recent_adj", "rebounds_avg_last_10",
+        "assists_recent_adj",  "assists_avg_last_10",
+        "steals_recent_adj",   "steals_avg_last_10",
+        "blocks_recent_adj",   "blocks_avg_last_10",
         "season_avg_points", "season_avg_rebounds", "season_avg_assists",
         "season_avg_steals", "season_avg_blocks",
         "minutes_avg_last_5", "minutes_avg_last_10", "minutes_trend",
@@ -364,6 +451,8 @@ def build_player_features(conn=None, incremental: bool = True) -> int:
         "opponent_steals_allowed", "opponent_blocks_allowed",
         "defense_adj_stl", "defense_adj_blk",
         "usage_proxy", "usage_trend_last_5",
+        "points_posterior", "rebounds_posterior", "assists_posterior",
+        "steals_posterior", "blocks_posterior",
         "team_off_rating", "opponent_def_rating", "rating_matchup_factor",
         "usage_delta_teammate_out", "assist_delta_teammate_out", "rebound_delta_teammate_out",
         "positional_defense_adj_pts", "positional_defense_adj_reb", "positional_defense_adj_ast",

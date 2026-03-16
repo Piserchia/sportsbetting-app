@@ -8,7 +8,7 @@ Sub-modules that compute individual feature groups. Called by `backend/models/fe
 
 | File | Feature Group | Output Columns |
 |------|--------------|---------------|
-| `rolling_stats.py` | L5/L10/season averages | `*_avg_last_5`, `*_avg_last_10`, `season_avg_*` |
+| `rolling_stats.py` | EWMA recent adj / L10 / season averages | `*_recent_adj`, `*_avg_last_10`, `season_avg_*` |
 | `minutes_features.py` | Minutes model | `minutes_projection`, `blowout_risk`, `blowout_adjustment_factor` |
 | `pace_features.py` | Pace context | `team_pace`, `opponent_pace`, `pace_adjustment_factor` |
 | `defense_features.py` | Opponent defense | `opponent_*_allowed`, `defense_adj_*` |
@@ -31,6 +31,9 @@ Sub-modules that compute individual feature groups. Called by `backend/models/fe
 ## Important Constraints
 
 - Feature builder supports incremental mode (default) and full rebuild
+- **All rolling features exclude the current game** — EWMA, L10, and season averages use only prior games to prevent target leakage during model training
+- First game per player has `*_recent_adj = 0.0` (no prior data)
+- A leakage guardrail asserts first-game features are zero; raises RuntimeError if violated
 - All sub-modules degrade gracefully with defaults if data is missing:
   - Pace → 100.0 (league average)
   - Defense → 110 pts / 44 reb / 25 ast allowed

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 
 const API = "http://localhost:8000";
 
@@ -15,9 +15,29 @@ const T = {
   red:       "#f87171",
   green:     "#34d399",
   greenMid:  "#6ee7b7",
+  live:      "#f87171",
+  liveBg:    "rgba(248,113,113,0.12)",
 };
 
 const STATS = ["all", "points", "rebounds", "assists", "steals", "blocks"];
+
+const STATUS_STYLE = {
+  Live:     { color: T.live,   bg: T.liveBg,   label: "LIVE" },
+  Upcoming: { color: T.accent, bg: T.accentBg,  label: "TODAY" },
+  Final:    { color: T.textFaint, bg: "rgba(69,72,96,0.2)", label: "FINAL" },
+};
+
+function GameStatusBadge({ status }) {
+  if (!status) return null;
+  const s = STATUS_STYLE[status] || STATUS_STYLE.Upcoming;
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: "0.07em",
+      padding: "1px 5px", borderRadius: 3,
+      color: s.color, background: s.bg, marginLeft: 5,
+    }}>{s.label}</span>
+  );
+}
 
 function EdgeBadge({ edge }) {
   if (edge === null || edge === undefined) return <span style={{ color: T.textFaint }}>—</span>;
@@ -42,7 +62,7 @@ function ProbBar({ prob }) {
   );
 }
 
-function LineDiff({ diff, stat }) {
+function LineDiff({ diff }) {
   if (diff === null || diff === undefined) return <span style={{ color: T.textFaint }}>—</span>;
   const color = diff > 0 ? T.green : diff < 0 ? T.red : T.textSub;
   return (
@@ -52,43 +72,95 @@ function LineDiff({ diff, stat }) {
   );
 }
 
+function FilterInput({ label, value, onChange, placeholder }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ color: T.textSub, fontSize: 12, whiteSpace: "nowrap" }}>{label}</span>
+      <input
+        type="number"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          width: 56, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.border}`,
+          background: T.card, color: T.text, fontSize: 12, textAlign: "center",
+        }}
+      />
+    </div>
+  );
+}
+
 export default function EdgesDashboard2({ onPlayerSelect }) {
-  const [edges, setEdges]       = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState(null);
-  const [minEdge, setMinEdge]   = useState(2);
-  const [inputVal, setInputVal] = useState("2");
+  const [edges, setEdges]           = useState([]);
+  const [data, setData]             = useState({});
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState(null);
+  const [minEdge, setMinEdge]       = useState(2);
+  const [inputVal, setInputVal]     = useState("2");
+  const [minLine, setMinLine]       = useState("");
+  const [maxLine, setMaxLine]       = useState("");
   const [statFilter, setStatFilter] = useState("all");
-  const [sortBy, setSortBy]     = useState("score"); // "score" | "edge" | "prob"
+  const [matchupFilter, setMatchupFilter] = useState("all");
+  const [sortBy, setSortBy]         = useState("score");
 
   const fetchEdges = useCallback(() => {
     setLoading(true);
     setError(null);
-    fetch(`${API}/edges/best?limit=1000&min_edge=${minEdge}`)
+    let url = `${API}/edges/best?limit=1000&min_edge=${minEdge}`;
+    if (minLine !== "") url += `&min_line=${minLine}`;
+    if (maxLine !== "") url += `&max_line=${maxLine}`;
+    fetch(url)
       .then(r => r.json())
-      .then(data => { setEdges(data.edges || []); setLoading(false); })
+      .then(d => { setEdges(d.edges || []); setData(d); setLoading(false); })
       .catch(() => { setError("Failed to load edges"); setLoading(false); });
-  }, [minEdge]);
+  }, [minEdge, minLine, maxLine]);
 
   useEffect(() => { fetchEdges(); }, [fetchEdges]);
 
-  const filtered = edges
-    .filter(e => statFilter === "all" || e.stat === statFilter)
-    .sort((a, b) => {
-      if (sortBy === "score") return b.score - a.score;
-      if (sortBy === "edge")  return b.edge_percent - a.edge_percent;
-      if (sortBy === "prob")  return b.probability - a.probability;
-      return 0;
-    })
-    .filter((e, _, arr) => {
-      // Keep only the best row per (player_id, stat) — already sorted so first seen wins
-      const key = `${e.player_id}|${e.stat}`;
-      return arr.findIndex(x => `${x.player_id}|${x.stat}` === key) === arr.indexOf(e);
+  // Derive unique matchups with game time (e.g., "LAL @ BOS")
+  const matchupInfo = useMemo(() => {
+    const map = {};
+    edges.forEach(e => {
+      if (e.matchup && !map[e.matchup]) {
+        map[e.matchup] = e.game_time_et || null;
+      }
     });
+    return map;
+  }, [edges]);
+  const allMatchups = useMemo(() => ["all", ...Object.keys(matchupInfo).sort()], [matchupInfo]);
 
-  const applyMinEdge = () => {
+  // Derive union of all book names
+  const allBooks = useMemo(() => {
+    const books = new Set();
+    edges.forEach(e => (e.books || []).forEach(b => books.add(b.book)));
+    return Array.from(books).sort();
+  }, [edges]);
+
+  const filtered = useMemo(() => {
+    const sorted = edges
+      .filter(e => statFilter === "all" || e.stat === statFilter)
+      .filter(e => matchupFilter === "all" || e.matchup === matchupFilter)
+      .sort((a, b) => {
+        if (sortBy === "score") return b.score - a.score;
+        if (sortBy === "edge")  return b.best_edge - a.best_edge;
+        if (sortBy === "prob")  return b.probability - a.probability;
+        return 0;
+      });
+
+    // Dedup: keep only the best row per (player_id, stat) — already sorted so first wins
+    const seen = new Set();
+    return sorted.filter(e => {
+      const key = `${e.player_id}|${e.stat}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [edges, statFilter, matchupFilter, sortBy]);
+
+  const applyFilters = () => {
     const v = parseFloat(inputVal);
     if (!isNaN(v)) setMinEdge(v);
+    fetchEdges();
   };
 
   return (
@@ -100,32 +172,27 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
         .sort-btn { background: none; border: none; cursor: pointer; padding: 0; margin-left: 4px;
                     color: ${T.textFaint}; font-size: 10px; }
         .sort-btn.active { color: ${T.accent}; }
+        input[type=number]::-webkit-inner-spin-button { opacity: 0.4; }
       `}</style>
 
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 12 }}>
         <div>
           <div style={{ color: T.text, fontSize: 18, fontWeight: 700 }}>Best Edges — Today</div>
           <div style={{ color: T.textSub, fontSize: 12, marginTop: 2 }}>
-            One row per player/stat · best line · best book · ranked by bet score
+            One row per player/stat · all sportsbooks · ranked by bet score
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ color: T.textSub, fontSize: 12 }}>Min edge:</span>
-          <input
-            type="number"
-            value={inputVal}
-            onChange={e => setInputVal(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && applyMinEdge()}
-            style={{
-              width: 52, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.border}`,
-              background: T.card, color: T.text, fontSize: 12, textAlign: "center",
-            }}
-          />
+        {/* Filters row */}
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <FilterInput label="Min edge:" value={inputVal} onChange={setInputVal} placeholder="2" />
+          <FilterInput label="Min line:" value={minLine} onChange={setMinLine} placeholder="—" />
+          <FilterInput label="Max line:" value={maxLine} onChange={setMaxLine} placeholder="—" />
           <button
-            onClick={applyMinEdge}
+            onClick={applyFilters}
+            onKeyDown={e => e.key === "Enter" && applyFilters()}
             style={{
-              padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`,
+              padding: "4px 14px", borderRadius: 6, border: `1px solid ${T.border}`,
               background: T.accentBg, color: T.accent, fontSize: 12, fontWeight: 600, cursor: "pointer",
             }}
           >
@@ -135,7 +202,7 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
       </div>
 
       {/* Stat filter */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
         {STATS.map(s => (
           <button
             key={s}
@@ -148,13 +215,35 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
               color: statFilter === s ? T.accent : T.textSub,
             }}
           >
-            {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+            {s === "all" ? "All Stats" : s.charAt(0).toUpperCase() + s.slice(1)}
           </button>
         ))}
-        <span style={{ marginLeft: "auto", color: T.textFaint, fontSize: 12, alignSelf: "center" }}>
-          {filtered.length} edges
-        </span>
       </div>
+
+      {/* Matchup filter */}
+      {allMatchups.length > 1 && (
+        <div style={{ display: "flex", gap: 5, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ color: T.textFaint, fontSize: 11, marginRight: 4 }}>Game:</span>
+          {allMatchups.map(m => (
+            <button
+              key={m}
+              onClick={() => setMatchupFilter(m)}
+              style={{
+                padding: "3px 10px", borderRadius: 5, fontSize: 11, fontWeight: 600,
+                cursor: "pointer", border: "1px solid",
+                borderColor: matchupFilter === m ? T.accent : T.border,
+                background: matchupFilter === m ? T.accentBg : "transparent",
+                color: matchupFilter === m ? T.accent : T.textSub,
+              }}
+            >
+              {m === "all" ? "All Games" : `${m}${matchupInfo[m] ? ` · ${matchupInfo[m]}` : ""}`}
+            </button>
+          ))}
+          <span style={{ marginLeft: "auto", color: T.textFaint, fontSize: 12, alignSelf: "center" }}>
+            {filtered.length} edges
+          </span>
+        </div>
+      )}
 
       {/* Table */}
       {loading ? (
@@ -162,7 +251,29 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
       ) : error ? (
         <div style={{ color: T.red, padding: 40, textAlign: "center" }}>{error}</div>
       ) : filtered.length === 0 ? (
-        <div style={{ color: T.textSub, padding: 40, textAlign: "center" }}>No edges found for selected filters.</div>
+        <div style={{
+          textAlign: "center", padding: "48px 24px",
+          background: T.card, borderRadius: 12, border: `1px solid ${T.border}`,
+        }}>
+          <div style={{ fontSize: 28, marginBottom: 12 }}>📊</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 8 }}>
+            No edges available for today
+          </div>
+          <div style={{ fontSize: 13, color: T.textSub, lineHeight: 1.6, maxWidth: 420, margin: "0 auto" }}>
+            {edges.length === 0
+              ? (data?.games_today === 0
+                  ? "No NBA games scheduled today."
+                  : !data?.has_sims
+                    ? `${data?.games_today} game${data?.games_today > 1 ? "s" : ""} today — pipeline hasn't run yet. Run the pipeline to generate projections and edges.`
+                    : !data?.has_props
+                      ? `${data?.games_today} game${data?.games_today > 1 ? "s" : ""} today — no sportsbook props loaded. Run props ingestion before games start.`
+                      : data?.upcoming_games === 0
+                        ? "All games have finished. Edges are generated for upcoming games only."
+                        : "No sportsbook edges found for today's games.")
+              : "No edges matched the current filters. Try adjusting the minimum edge or line range."
+            }
+          </div>
+        </div>
       ) : (
         <div style={{ background: T.card, borderRadius: 10, border: `1px solid ${T.border}`, overflow: "hidden" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -173,16 +284,15 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
                 <th className="e2-th">Stat</th>
                 <th className="e2-th">Line</th>
                 <th className="e2-th">Projection</th>
-                <th className="e2-th">
-                  vs Line
-                </th>
+                <th className="e2-th">vs Line</th>
                 <th className="e2-th">
                   Prob
                   <button className={`sort-btn ${sortBy === "prob" ? "active" : ""}`} onClick={() => setSortBy("prob")}>▼</button>
                 </th>
                 <th className="e2-th">Fair Odds</th>
-                <th className="e2-th">Best Book</th>
-                <th className="e2-th">Odds</th>
+                {allBooks.map(book => (
+                  <th key={book} className="e2-th">{book.replace("draftkings", "DK").replace("fanduel", "FD").replace("betmgm", "MGM")}</th>
+                ))}
                 <th className="e2-th">
                   Edge
                   <button className={`sort-btn ${sortBy === "edge" ? "active" : ""}`} onClick={() => setSortBy("edge")}>▼</button>
@@ -194,56 +304,73 @@ export default function EdgesDashboard2({ onPlayerSelect }) {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((e, i) => (
-                <tr
-                  key={i}
-                  className="e2-row"
-                  style={{ background: i % 2 === 0 ? T.card : "rgba(255,255,255,0.015)", borderBottom: `1px solid ${T.border}` }}
-                  onClick={() => onPlayerSelect && onPlayerSelect({ player_id: e.player_id, full_name: e.player })}
-                >
-                  <td style={{ padding: "10px 12px", color: T.text, fontWeight: 600, fontSize: 13 }}>
-                    {e.player}
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.textSub, fontSize: 12 }}>
-                    {e.matchup}
-                  </td>
-                  <td style={{ padding: "10px 12px" }}>
-                    <span style={{
-                      background: T.accentBg, color: T.accent,
-                      padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
-                    }}>
-                      {e.stat.toUpperCase()}
-                    </span>
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
-                    {e.line}
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.textSub, fontVariantNumeric: "tabular-nums" }}>
-                    {e.projection !== null ? e.projection.toFixed(1) : "—"}
-                  </td>
-                  <td style={{ padding: "10px 12px" }}>
-                    <LineDiff diff={e.line_diff} stat={e.stat} />
-                  </td>
-                  <td style={{ padding: "10px 12px" }}>
-                    <ProbBar prob={e.probability} />
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.textSub, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
-                    {e.fair_odds !== null ? (e.fair_odds > 0 ? `+${e.fair_odds}` : e.fair_odds) : "—"}
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.textSub, fontSize: 12, fontWeight: 600 }}>
-                    {e.best_book}
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.text, fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
-                    {e.best_odds !== null ? (e.best_odds > 0 ? `+${e.best_odds}` : e.best_odds) : "—"}
-                  </td>
-                  <td style={{ padding: "10px 12px" }}>
-                    <EdgeBadge edge={e.edge_percent} />
-                  </td>
-                  <td style={{ padding: "10px 12px", color: T.accent, fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
-                    {e.score.toFixed(1)}
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((e, i) => {
+                const bookMap = {};
+                (e.books || []).forEach(b => { bookMap[b.book] = b; });
+                return (
+                  <tr
+                    key={i}
+                    className="e2-row"
+                    style={{ background: i % 2 === 0 ? T.card : "rgba(255,255,255,0.015)", borderBottom: `1px solid ${T.border}` }}
+                    onClick={() => onPlayerSelect && onPlayerSelect({ player_id: e.player_id, full_name: e.player })}
+                  >
+                    <td style={{ padding: "10px 12px", color: T.text, fontWeight: 600, fontSize: 13 }}>
+                      {e.player}
+                    </td>
+                    <td style={{ padding: "10px 12px", color: T.textSub, fontSize: 12, whiteSpace: "nowrap" }}>
+                      {e.matchup}
+                      {e.game_time_et && <span style={{ color: T.textFaint, fontSize: 10, marginLeft: 5 }}>{e.game_time_et}</span>}
+                      <GameStatusBadge status={e.game_status} />
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <span style={{
+                        background: T.accentBg, color: T.accent,
+                        padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 700,
+                      }}>
+                        {e.stat.toUpperCase()}
+                      </span>
+                    </td>
+                    <td style={{ padding: "10px 12px", color: T.text, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                      {e.line}
+                    </td>
+                    <td style={{ padding: "10px 12px", color: T.textSub, fontVariantNumeric: "tabular-nums" }}>
+                      {e.projection !== null && e.projection !== undefined ? e.projection.toFixed(1) : "—"}
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <LineDiff diff={e.line_diff} />
+                    </td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <ProbBar prob={e.probability} />
+                    </td>
+                    <td style={{ padding: "10px 12px", color: T.textSub, fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                      {e.fair_odds !== null ? (e.fair_odds > 0 ? `+${e.fair_odds}` : e.fair_odds) : "—"}
+                    </td>
+                    {allBooks.map(book => {
+                      const bk = bookMap[book];
+                      return (
+                        <td key={book} style={{ padding: "10px 12px", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                          {bk ? (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                              <span style={{ color: T.text }}>{bk.odds > 0 ? `+${bk.odds}` : bk.odds}</span>
+                              <span style={{ fontSize: 10, color: bk.edge_percent >= 4 ? T.green : bk.edge_percent >= 2 ? T.greenMid : T.textFaint }}>
+                                {bk.edge_percent > 0 ? "+" : ""}{bk.edge_percent.toFixed(1)}%
+                              </span>
+                            </div>
+                          ) : (
+                            <span style={{ color: T.textFaint }}>—</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                    <td style={{ padding: "10px 12px" }}>
+                      <EdgeBadge edge={e.best_edge} />
+                    </td>
+                    <td style={{ padding: "10px 12px", color: T.accent, fontWeight: 700, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                      {e.score.toFixed(1)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

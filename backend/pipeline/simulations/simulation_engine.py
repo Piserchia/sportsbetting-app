@@ -421,25 +421,26 @@ def simulate_player_props(conn=None) -> int:
             conn.close()
         return 0
 
-    # Build lookup dicts
+    # Build lookup dicts keyed by (player_id, game_id, stat) to support
+    # multiple upcoming games per player
     proj_means: dict[tuple, float] = {}
-    proj_minutes: dict[str, float] = {}
+    proj_minutes: dict[tuple, float] = {}
     for _, row in projections.iterrows():
         pid = str(row["player_id"])
-        proj_means[(pid, "points")]   = float(row["points_mean"])
-        proj_means[(pid, "rebounds")] = float(row["rebounds_mean"])
-        proj_means[(pid, "assists")]  = float(row["assists_mean"])
-        proj_means[(pid, "steals")]   = float(row["steals_mean"])
-        proj_means[(pid, "blocks")]   = float(row["blocks_mean"])
-        proj_minutes[pid]             = float(row["minutes_projection"])
+        gid = str(row["game_id"])
+        proj_means[(pid, gid, "points")]   = float(row["points_mean"])
+        proj_means[(pid, gid, "rebounds")] = float(row["rebounds_mean"])
+        proj_means[(pid, gid, "assists")]  = float(row["assists_mean"])
+        proj_means[(pid, gid, "steals")]   = float(row["steals_mean"])
+        proj_means[(pid, gid, "blocks")]   = float(row["blocks_mean"])
+        proj_minutes[(pid, gid)]           = float(row["minutes_projection"])
 
     dist_lookup: dict[tuple, dict] = {}
     for _, row in distributions.iterrows():
-        key = (str(row["player_id"]), row["stat"])
+        key = (str(row["player_id"]), str(row["game_id"]), row["stat"])
         dist_lookup[key] = {
             "mean":    float(row["mean"]),
             "std_dev": float(row["std_dev"]),
-            "game_id": str(row["game_id"]),
         }
 
     logs_by_player = {
@@ -447,9 +448,11 @@ def simulate_player_props(conn=None) -> int:
         for pid, grp in game_logs.groupby("player_id")
     }
 
-    players = distributions["player_id"].astype(str).unique()
+    # Build unique (player_id, game_id) pairs from distributions
+    player_games = distributions[["player_id", "game_id"]].drop_duplicates()
+    player_games = [(str(r["player_id"]), str(r["game_id"])) for _, r in player_games.iterrows()]
     logger.info(
-        f"Simulating {SIMULATION_COUNT:,} games for {len(players)} players "
+        f"Simulating {SIMULATION_COUNT:,} draws for {len(player_games)} player-game pairs "
         f"(minutes-conditioned | gamma pts | negbin reb/ast | copula combos)..."
     )
 
@@ -457,18 +460,16 @@ def simulate_player_props(conn=None) -> int:
     records = []
     rng     = np.random.default_rng(seed=42)
 
-    for player_id in players:
-        pts_key = (player_id, "points")
-        reb_key = (player_id, "rebounds")
-        ast_key = (player_id, "assists")
+    for player_id, game_id in player_games:
+        pts_key = (player_id, game_id, "points")
+        reb_key = (player_id, game_id, "rebounds")
+        ast_key = (player_id, game_id, "assists")
 
         if pts_key not in dist_lookup:
             continue
 
-        game_id = dist_lookup[pts_key]["game_id"]
-
-        stl_key = (player_id, "steals")
-        blk_key = (player_id, "blocks")
+        stl_key = (player_id, game_id, "steals")
+        blk_key = (player_id, game_id, "blocks")
 
         mean_pts = proj_means.get(pts_key, dist_lookup[pts_key]["mean"])
         mean_reb = proj_means.get(reb_key, dist_lookup.get(reb_key, {}).get("mean", 0.0))
@@ -483,7 +484,7 @@ def simulate_player_props(conn=None) -> int:
         std_blk = max(dist_lookup.get(blk_key, {}).get("std_dev", 0.7), 0.5)
 
         # ── Simulate minutes (shared across all stats for this player) ────
-        min_proj = proj_minutes.get(player_id, 0.0)
+        min_proj = proj_minutes.get((player_id, game_id), 0.0)
         if min_proj > 0:
             minutes_sim = _sim_minutes(rng, min_proj, SIMULATION_COUNT)
         else:
@@ -609,7 +610,9 @@ def simulate_player_props(conn=None) -> int:
     # ── Post-simulation sanity checks ──────────────────────────────────
     try:
         from backend.pipeline.simulations.simulation_validation import validate_simulations
-        validate_simulations(conn, proj_means)
+        # Flatten 3-tuple keys to 2-tuple for validation (last game_id wins, which is fine)
+        proj_means_flat = {(pid, stat): val for (pid, _gid, stat), val in proj_means.items()}
+        validate_simulations(conn, proj_means_flat)
     except Exception as e:
         logger.warning(f"  Simulation validation failed: {e}")
 

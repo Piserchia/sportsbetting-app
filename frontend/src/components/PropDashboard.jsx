@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import PipelineStatus from "./PipelineStatus";
-import EdgesDashboard from "./EdgesDashboard";
 import EdgesDashboard2 from "./EdgesDashboard2";
 import PipelineExplorer from "./PipelineExplorer";
+import ModelHealthDashboard from "./ModelHealthDashboard";
+import BetPerformanceDashboard from "./BetPerformanceDashboard";
 import ProjectionDebugger from "./ProjectionDebugger";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -332,8 +333,9 @@ export default function PropDashboard() {
             {[
               { key: "props",    label: "Props" },
               { key: "edges",    label: "Edges" },
-              { key: "edges2",   label: "Edges v2" },
               { key: "pipeline", label: "Pipeline" },
+              { key: "model-health", label: "Model Health" },
+              { key: "bets", label: "Bet Performance" },
               { key: "explorer", label: "How It Works" },
             ].map(tab => (
               <button
@@ -361,11 +363,10 @@ export default function PropDashboard() {
       </div>
 
       {page === "pipeline" && <PipelineStatus />}
+      {page === "model-health" && <ModelHealthDashboard />}
+      {page === "bets" && <BetPerformanceDashboard />}
       {page === "explorer" && <PipelineExplorer />}
       {page === "edges" && (
-        <EdgesDashboard onPlayerSelect={p => { setPage("props"); handleSelect(p); }} />
-      )}
-      {page === "edges2" && (
         <EdgesDashboard2 onPlayerSelect={p => { setPage("props"); handleSelect(p); }} />
       )}
 

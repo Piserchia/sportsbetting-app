@@ -560,6 +560,7 @@ def ingest_props(include_alternates: bool = True, conn=None) -> int:
     )
 
     written = 0
+    written_game_ids = set()
     for rec in prop_records:
         try:
             conn.execute("""
@@ -573,10 +574,13 @@ def ingest_props(include_alternates: bool = True, conn=None) -> int:
                 rec["stat"],       rec["line"], rec["over_odds"], rec["under_odds"],
             ])
             written += 1
+            written_game_ids.add(rec["game_id"])
         except Exception as e:
             logger.debug(f"  History insert error: {e}")
 
-    _rebuild_sportsbook_props(conn, today_game_ids)
+    # Rebuild snapshot for today's games AND any other games that had props written
+    all_game_ids = list(set(today_game_ids) | written_game_ids)
+    _rebuild_sportsbook_props(conn, all_game_ids)
 
     unmatched_events = len(events)  # rough proxy; detailed count inside parser
     msg = (f"{written} rows appended to history | "

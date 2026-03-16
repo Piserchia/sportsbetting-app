@@ -39,6 +39,7 @@ tables:
       home_score: {type: INTEGER}
       away_score: {type: INTEGER}
       status: {type: VARCHAR, notes: "Final, Live, Upcoming"}
+      game_time_et: {type: VARCHAR, notes: "e.g. 7:30 PM ET, NULL if unknown"}
       updated_at: {type: TIMESTAMP, default: current_timestamp}
 
   player_game_stats:

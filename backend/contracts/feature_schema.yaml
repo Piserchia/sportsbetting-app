@@ -6,19 +6,20 @@
 feature_groups:
   rolling_stats:
     source: backend/features/rolling_stats.py
+    notes: "EWMA (weights [0.40,0.25,0.15,0.10,0.06,0.04]) + regression-to-mean clipping (±6)"
     columns:
-      - points_avg_last_5
+      - points_recent_adj
       - points_avg_last_10
-      - rebounds_avg_last_5
+      - rebounds_recent_adj
       - rebounds_avg_last_10
-      - assists_avg_last_5
+      - assists_recent_adj
       - assists_avg_last_10
       - season_avg_points
       - season_avg_rebounds
       - season_avg_assists
-      - steals_avg_last_5
+      - steals_recent_adj
       - steals_avg_last_10
-      - blocks_avg_last_5
+      - blocks_recent_adj
       - blocks_avg_last_10
       - season_avg_steals
       - season_avg_blocks

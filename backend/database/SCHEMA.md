@@ -44,6 +44,7 @@
 | home_score | INTEGER | NULL if upcoming |
 | away_score | INTEGER | NULL if upcoming |
 | status | VARCHAR | 'Final', 'Live', 'Upcoming' |
+| game_time_et | VARCHAR | e.g. '7:30 PM ET', NULL if unknown |
 | updated_at | TIMESTAMP | DEFAULT current_timestamp |
 
 ### player_game_stats
@@ -132,18 +133,18 @@
 |--------|------|-------|
 | **game_id** | TEXT | **PK** (composite with player_id) |
 | **player_id** | TEXT | **PK** |
-| points_avg_last_5 | DOUBLE | Rolling averages |
+| points_recent_adj | DOUBLE | EWMA recent adjusted (regression-to-mean clipped ±6) |
 | points_avg_last_10 | DOUBLE | |
-| rebounds_avg_last_5 | DOUBLE | |
+| rebounds_recent_adj | DOUBLE | EWMA recent adjusted |
 | rebounds_avg_last_10 | DOUBLE | |
-| assists_avg_last_5 | DOUBLE | |
+| assists_recent_adj | DOUBLE | EWMA recent adjusted |
 | assists_avg_last_10 | DOUBLE | |
 | season_avg_points | DOUBLE | |
 | season_avg_rebounds | DOUBLE | |
 | season_avg_assists | DOUBLE | |
-| steals_avg_last_5 | DOUBLE | |
+| steals_recent_adj | DOUBLE | EWMA recent adjusted |
 | steals_avg_last_10 | DOUBLE | |
-| blocks_avg_last_5 | DOUBLE | |
+| blocks_recent_adj | DOUBLE | EWMA recent adjusted |
 | blocks_avg_last_10 | DOUBLE | |
 | season_avg_steals | DOUBLE | |
 | season_avg_blocks | DOUBLE | |
@@ -170,6 +171,11 @@
 | defense_adj_blk | DOUBLE | |
 | usage_proxy | DOUBLE | Usage context |
 | usage_trend_last_5 | DOUBLE | |
+| points_posterior | DOUBLE | Bayesian shrinkage posterior (k=20 toward position prior) |
+| rebounds_posterior | DOUBLE | Bayesian shrinkage posterior |
+| assists_posterior | DOUBLE | Bayesian shrinkage posterior |
+| steals_posterior | DOUBLE | Bayesian shrinkage posterior |
+| blocks_posterior | DOUBLE | Bayesian shrinkage posterior |
 | positional_defense_adj_pts | DOUBLE | Positional defense |
 | positional_defense_adj_reb | DOUBLE | |
 | positional_defense_adj_ast | DOUBLE | |
@@ -197,6 +203,7 @@
 | steals_mean | DOUBLE | |
 | blocks_mean | DOUBLE | |
 | minutes_projection | DOUBLE | |
+| generated_at | TIMESTAMP | When this projection was generated; used as staleness guard |
 
 ### player_distributions
 | Column | Type | Notes |
@@ -363,3 +370,58 @@
 | stat | TEXT | points, rebounds, assists, steals, blocks |
 | feature | TEXT | Feature name from STAT_FEATURES |
 | contribution | DOUBLE | SHAP value (positive = pushed projection up) |
+
+### model_feature_importance
+| Column | Type | Notes |
+|--------|------|-------|
+| **stat** | TEXT | **PK** (composite) — points, rebounds, etc. |
+| **position_group** | TEXT | **PK** — Guard, Forward, Center, or "all" |
+| **feature** | TEXT | **PK** — feature name from STAT_FEATURES |
+| importance | DOUBLE | LightGBM gain-based importance |
+| model_version | TEXT | Timestamp-based version string (YYYYMMDD_HHMM) |
+| created_at | TIMESTAMP | DEFAULT current_timestamp |
+
+### model_versions
+| Column | Type | Notes |
+|--------|------|-------|
+| **version** | TEXT | **PK** — version string (e.g., "20250315_1200") |
+| created_at | TIMESTAMP | When this version was registered |
+| git_commit | TEXT | Git SHA at training time |
+| training_games | INTEGER | Number of games in training set |
+| notes | TEXT | Free-text description of changes |
+
+### model_recommendations
+| Column | Type | Notes |
+|--------|------|-------|
+| **bet_id** | TEXT | **PK** |
+| timestamp_generated | TIMESTAMP | When the recommendation was created |
+| model_version | TEXT | FK → model_versions |
+| game_id | TEXT | |
+| player_id | INTEGER | |
+| player_name | TEXT | |
+| team | TEXT | |
+| stat | TEXT | |
+| line | DOUBLE | Half-point prop line |
+| sportsbook | TEXT | Book name |
+| odds | INTEGER | American odds at time of recommendation |
+| model_probability | DOUBLE | Model's estimated probability |
+| edge_percent | DOUBLE | (model_prob - implied_prob) * 100 |
+| confidence_score | DOUBLE | Composite confidence metric |
+| closing_line | DOUBLE | Line at game start (filled by update_bet_results) |
+| closing_odds | INTEGER | Odds at game start (filled by update_bet_results) |
+| actual_stat | DOUBLE | Actual player stat (filled by update_bet_results) |
+| result | TEXT | 'win', 'loss', 'push', or 'pending' |
+| player_position | TEXT | Position (PG/SG/SF/PF/C) from player_features |
+| opponent_team | TEXT | Opponent abbreviation derived from games table |
+
+### player_stat_posteriors
+| Column | Type | Notes |
+|--------|------|-------|
+| **player_id** | TEXT | **PK** (composite with stat) |
+| **stat** | TEXT | **PK** — points, rebounds, assists, steals, blocks |
+| posterior_mean | DOUBLE | Bayesian posterior: (n*player_mean + k*prior) / (n+k) |
+| player_mean | DOUBLE | Raw observed mean from game logs |
+| prior_mean | DOUBLE | Position-group population mean |
+| n_games | INTEGER | Games played |
+| position_group | TEXT | Guard, Forward, or Center |
+| created_at | TIMESTAMP | DEFAULT current_timestamp |

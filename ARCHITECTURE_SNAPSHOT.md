@@ -42,6 +42,7 @@ sportsbetting-app/
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── advanced_defense_features.py
+│   │   ├── bayesian_shrinkage.py
 │   │   ├── clv_tracker.py
 │   │   ├── defense_features.py
 │   │   ├── edges_query.py

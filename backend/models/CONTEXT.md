@@ -8,7 +8,8 @@ ML projections, Monte Carlo simulations, feature orchestration, and performance 
 
 | File | Purpose | Tables Written |
 |------|---------|---------------|
-| `feature_builder.py` | Orchestrates all feature groups | `player_features` |
+| `bayesian_shrinkage.py` | Hierarchical Bayesian shrinkage toward position priors (k=20) | `player_stat_posteriors` |
+| `feature_builder.py` | Orchestrates all feature groups including Bayesian posteriors | `player_features` |
 | `projection_model.py` | LightGBM stat projections; `std_dev` in distributions is scaled to projected mean to preserve CV | `player_projections`, `player_distributions` |
 | `stat_models.py` | Position-specific LightGBM models | (used by projection_model) |
 | `simulation_engine.py` | Monte Carlo simulations | `player_simulations` |

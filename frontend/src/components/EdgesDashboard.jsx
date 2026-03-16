@@ -145,8 +145,7 @@ export default function EdgesDashboard({ onPlayerSelect }) {
               Best Edges
               {data?.date && (
                 <span style={{ fontSize: 13, fontWeight: 400, color: T.textSub, marginLeft: 10 }}>
-                  {data.is_today ? "Today" : data.date}
-                  {!data.is_today && <span style={{ color: T.warn, marginLeft: 6, fontSize: 11, fontWeight: 600 }}>⚠ not today's games</span>}
+                  {data.date}
                 </span>
               )}
             </div>
@@ -266,8 +265,26 @@ export default function EdgesDashboard({ onPlayerSelect }) {
         )}
 
         {!loading && edges.length === 0 && (
-          <div style={{ textAlign: "center", color: T.textSub, padding: 60, fontSize: 13 }}>
-            No edges found for the current filters.
+          <div style={{
+            textAlign: "center", padding: "48px 24px",
+            background: T.surface, borderRadius: 12, border: `1px solid ${T.border}`,
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 12 }}>📊</div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 8 }}>
+              No edges available for today
+            </div>
+            <div style={{ fontSize: 13, color: T.textSub, lineHeight: 1.6, maxWidth: 420, margin: "0 auto" }}>
+              {data?.games_today === 0
+                ? "No NBA games scheduled today."
+                : !data?.has_sims
+                  ? `${data?.games_today} game${data?.games_today > 1 ? "s" : ""} today — pipeline hasn't run yet. Run the pipeline to generate projections and edges.`
+                  : !data?.has_props
+                    ? `${data?.games_today} game${data?.games_today > 1 ? "s" : ""} today — no sportsbook props loaded. Run props ingestion before games start.`
+                    : data?.upcoming_games === 0
+                      ? "All games have finished. Edges are generated for upcoming games only."
+                      : "No edges matched the current filters. Try adjusting the minimum probability."
+              }
+            </div>
           </div>
         )}
 

@@ -37,6 +37,18 @@ def generate_projections(conn=None) -> int:
     try:
         ml_projections = generate_ml_projections(conn=conn)
         if not ml_projections.empty:
+            # Guardrail: log any projections keyed to Final games
+            stale_check = conn.execute("""
+                SELECT COUNT(*) FROM ml_projections mp
+                JOIN games g ON mp.game_id = g.game_id
+                WHERE g.status = 'Final'
+            """).fetchone()[0]
+            if stale_check > 0:
+                logger.warning(
+                    f"  ⚠ {stale_check} projections keyed to Final games — "
+                    f"these will not appear in edges. Check upcoming game mapping."
+                )
+
             conn.execute("DELETE FROM player_projections")
             conn.execute("""
                 INSERT INTO player_projections
@@ -45,6 +57,11 @@ def generate_projections(conn=None) -> int:
                 SELECT game_id, player_id, points_mean, rebounds_mean, assists_mean,
                        steals_mean, blocks_mean, minutes_projection
                 FROM ml_projections
+            """)
+            conn.execute("""
+                UPDATE player_projections
+                SET generated_at = current_timestamp
+                WHERE generated_at IS NULL
             """)
             n_ml = len(ml_projections)
             logger.info(f"  → {n_ml} rows written to player_projections (ML).")
@@ -73,17 +90,17 @@ def generate_projections(conn=None) -> int:
 
     features["base_pts"] = (
         0.5 * features["points_avg_last_10"] +
-        0.3 * features["points_avg_last_5"] +
+        0.3 * features.get("points_recent_adj", features["points_avg_last_10"]) +
         0.2 * features.get("season_avg_points", features["points_avg_last_10"])
     )
     features["base_reb"] = (
         0.5 * features["rebounds_avg_last_10"] +
-        0.3 * features.get("rebounds_avg_last_5", features["rebounds_avg_last_10"]) +
+        0.3 * features.get("rebounds_recent_adj", features["rebounds_avg_last_10"]) +
         0.2 * features.get("season_avg_rebounds", features["rebounds_avg_last_10"])
     )
     features["base_ast"] = (
         0.5 * features["assists_avg_last_10"] +
-        0.3 * features.get("assists_avg_last_5", features["assists_avg_last_10"]) +
+        0.3 * features.get("assists_recent_adj", features["assists_avg_last_10"]) +
         0.2 * features.get("season_avg_assists", features["assists_avg_last_10"])
     )
 
@@ -98,14 +115,14 @@ def generate_projections(conn=None) -> int:
     def_adj_blk = features.get("defense_adj_blk", pd.Series(1.0, index=features.index)).fillna(1.0).clip(DEF_ADJ_MIN, DEF_ADJ_MAX)
 
     base_stl = (
-        0.5 * features.get("steals_avg_last_10", pd.Series(0.0, index=features.index)) +
-        0.3 * features.get("steals_avg_last_5",  pd.Series(0.0, index=features.index)) +
-        0.2 * features.get("season_avg_steals",  pd.Series(0.0, index=features.index))
+        0.5 * features.get("steals_avg_last_10",  pd.Series(0.0, index=features.index)) +
+        0.3 * features.get("steals_recent_adj",   pd.Series(0.0, index=features.index)) +
+        0.2 * features.get("season_avg_steals",   pd.Series(0.0, index=features.index))
     )
     base_blk = (
-        0.5 * features.get("blocks_avg_last_10", pd.Series(0.0, index=features.index)) +
-        0.3 * features.get("blocks_avg_last_5",  pd.Series(0.0, index=features.index)) +
-        0.2 * features.get("season_avg_blocks",  pd.Series(0.0, index=features.index))
+        0.5 * features.get("blocks_avg_last_10",  pd.Series(0.0, index=features.index)) +
+        0.3 * features.get("blocks_recent_adj",   pd.Series(0.0, index=features.index)) +
+        0.2 * features.get("season_avg_blocks",   pd.Series(0.0, index=features.index))
     )
 
     features["points_mean"]        = (features["base_pts"] * pace_adj * def_adj_pts * usage_adj).clip(lower=0).round(4)
@@ -119,6 +136,11 @@ def generate_projections(conn=None) -> int:
                              "assists_mean", "steals_mean", "blocks_mean", "minutes_projection"]].copy()
     conn.execute("DELETE FROM player_projections")
     conn.execute("INSERT INTO player_projections SELECT * FROM projections")
+    conn.execute("""
+        UPDATE player_projections
+        SET generated_at = current_timestamp
+        WHERE generated_at IS NULL
+    """)
     logger.info(f"  → {len(projections)} rows written to player_projections (heuristic).")
 
     dist_count = build_distributions(conn)
@@ -157,13 +179,27 @@ def build_distributions(conn=None) -> int:
             conn.close()
         return 0
 
+    # Use the game_id from player_projections (upcoming game) so distributions
+    # align with projections and simulations key to the correct game.
+    # Picks the earliest upcoming game per player; falls back to latest completed game_id.
     latest_games = conn.execute("""
-        SELECT player_id, game_id
-        FROM (
+        WITH proj_games AS (
+            SELECT pp.player_id, pp.game_id,
+                   ROW_NUMBER() OVER (PARTITION BY pp.player_id ORDER BY g.game_date ASC) AS rn
+            FROM player_projections pp
+            JOIN games g ON pp.game_id = g.game_id
+            WHERE g.game_date >= CURRENT_DATE AND g.status != 'Final'
+        ),
+        log_games AS (
             SELECT player_id, game_id,
                    ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_date DESC) AS rn
             FROM player_game_logs
-        ) t WHERE rn = 1
+        )
+        SELECT COALESCE(pg.player_id, lg.player_id) AS player_id,
+               COALESCE(pg.game_id, lg.game_id) AS game_id
+        FROM log_games lg
+        LEFT JOIN proj_games pg ON CAST(lg.player_id AS TEXT) = pg.player_id AND pg.rn = 1
+        WHERE lg.rn = 1
     """).df()
 
     stats = ["points", "rebounds", "assists", "steals", "blocks"]

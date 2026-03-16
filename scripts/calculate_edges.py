@@ -130,9 +130,139 @@ def calculate_edges(conn=None) -> int:
                 f"Edge: +{row['edge_percent']:.1f}%"
             )
 
+    # Log qualifying bets to model_recommendations
+    _log_recommendations(conn, edges)
+
     if close:
         conn.close()
     return len(result)
+
+
+def _get_model_version() -> str:
+    """Return a model version string based on the current date."""
+    from datetime import datetime
+    return datetime.now().strftime("v%Y%m%d")
+
+
+def _log_recommendations(conn, edges_df: pd.DataFrame):
+    """
+    Insert qualifying bets into model_recommendations.
+    Criteria: edge_percent >= 3 and model_probability >= 0.55.
+    Skips duplicates by checking existing (player_id, game_id, stat, line, book).
+    """
+    qualified = edges_df[
+        (edges_df["edge_percent"] >= 3.0) &
+        (edges_df["model_probability"] >= 0.55)
+    ].copy()
+
+    if qualified.empty:
+        logger.info("  No qualifying bets to log.")
+        return
+
+    # Look up player names, teams, and positions
+    try:
+        player_info = conn.execute("""
+            SELECT p.player_id, p.full_name,
+                   t.abbreviation AS team
+            FROM players p
+            LEFT JOIN (
+                SELECT player_id, team_id,
+                       ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) AS rn
+                FROM player_game_stats
+            ) pgs ON p.player_id = pgs.player_id AND pgs.rn = 1
+            LEFT JOIN teams t ON pgs.team_id = t.team_id
+        """).df()
+        name_lookup = dict(zip(player_info["player_id"].astype(str), player_info["full_name"]))
+        team_lookup = dict(zip(player_info["player_id"].astype(str), player_info["team"]))
+    except Exception:
+        name_lookup = {}
+        team_lookup = {}
+
+    # Look up player positions from player_features
+    try:
+        pos_info = conn.execute("""
+            SELECT player_id, player_position
+            FROM player_features
+            WHERE player_position IS NOT NULL
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) = 1
+        """).df()
+        position_lookup = dict(zip(pos_info["player_id"].astype(str), pos_info["player_position"]))
+    except Exception:
+        position_lookup = {}
+
+    # Look up game info for opponent resolution
+    try:
+        game_info = conn.execute("""
+            SELECT game_id, home_team_abbr, away_team_abbr
+            FROM games
+        """).df()
+        game_home = dict(zip(game_info["game_id"].astype(str), game_info["home_team_abbr"]))
+        game_away = dict(zip(game_info["game_id"].astype(str), game_info["away_team_abbr"]))
+    except Exception:
+        game_home = {}
+        game_away = {}
+
+    # Get existing bets to avoid duplicates
+    try:
+        existing = conn.execute("""
+            SELECT CAST(player_id AS TEXT) || '_' || game_id || '_' || stat || '_' ||
+                   CAST(line AS VARCHAR) || '_' || sportsbook AS key
+            FROM model_recommendations
+        """).df()
+        existing_keys = set(existing["key"].values) if not existing.empty else set()
+    except Exception:
+        existing_keys = set()
+
+    model_version = _get_model_version()
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    inserted = 0
+
+    for _, row in qualified.iterrows():
+        pid = str(row["player_id"])
+        gid = str(row["game_id"])
+        key = f"{pid}_{gid}_{row['stat']}_{row['line']}_{row['book']}"
+        if key in existing_keys:
+            continue
+
+        confidence = round(
+            (row["edge_percent"] * 0.6) + (row["model_probability"] * 25), 2
+        )
+        player_team = team_lookup.get(pid, "")
+        home = game_home.get(gid, "")
+        away = game_away.get(gid, "")
+        if player_team and home and away:
+            opponent = away if player_team == home else home
+        else:
+            opponent = None
+        position = position_lookup.get(pid)
+        try:
+            conn.execute("""
+                INSERT INTO model_recommendations (
+                    bet_id, timestamp_generated, model_version,
+                    game_id, player_id, player_name, team,
+                    stat, line, sportsbook, odds,
+                    model_probability, edge_percent, confidence_score,
+                    player_position, opponent_team
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, [
+                str(uuid.uuid4()), now, model_version,
+                gid, int(pid) if pid.isdigit() else 0,
+                name_lookup.get(pid, "Unknown"),
+                player_team,
+                row["stat"], float(row["line"]),
+                row["book"], int(row["sportsbook_odds"]) if pd.notna(row["sportsbook_odds"]) else None,
+                round(float(row["model_probability"]), 6),
+                round(float(row["edge_percent"]), 2),
+                confidence,
+                position,
+                opponent,
+            ])
+            inserted += 1
+        except Exception as e:
+            logger.debug(f"  Recommendation insert error: {e}")
+
+    logger.info(f"  → {inserted} qualifying bets logged to model_recommendations.")
 
 
 def _write_model_only_edges(conn) -> int:

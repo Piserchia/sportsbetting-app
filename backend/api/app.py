@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database.connection import get_connection
 from backend.models.edges_query import get_best_edges
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -182,13 +183,16 @@ def player_profile(player_id: int):
             WHERE player_id = CAST(? AS TEXT)
         """, [player_id]).fetchone()
 
-        # Projection
+        # Projection — only from upcoming games to avoid showing stale historical data
         proj = conn.execute("""
-            SELECT minutes_projection, points_mean, rebounds_mean, assists_mean,
-                   COALESCE(steals_mean, 0.0), COALESCE(blocks_mean, 0.0)
-            FROM player_projections
-            WHERE player_id = CAST(? AS TEXT)
-            ORDER BY game_id DESC LIMIT 1
+            SELECT pp.minutes_projection, pp.points_mean, pp.rebounds_mean, pp.assists_mean,
+                   COALESCE(pp.steals_mean, 0.0), COALESCE(pp.blocks_mean, 0.0)
+            FROM player_projections pp
+            JOIN games g ON pp.game_id = g.game_id
+            WHERE pp.player_id = CAST(? AS TEXT)
+              AND g.game_date >= CURRENT_DATE
+              AND g.status != 'Final'
+            ORDER BY g.game_date ASC LIMIT 1
         """, [player_id]).fetchone()
 
         # Next upcoming game
@@ -526,30 +530,18 @@ def games_today():
 @app.get("/edges/today")
 def edges_today(min_probability: float = 0.6, stat: Optional[str] = None):
     """
-    Best prop edges for the most recent game date that has edge data.
+    Best prop edges for today's games only.
     Limited to top 3 lines per player, sorted by edge_percent (or model_probability
     when no sportsbook data is available).
 
-    Falls back to the most recent date with edges if today has none.
+    Returns empty if no edges exist for today — never falls back to previous dates.
     """
     conn = get_connection()
     try:
-        # Find the best available date — prefer today, fall back to most recent
-        date_row = conn.execute("""
-            SELECT MAX(g.game_date)
-            FROM prop_edges pe
-            JOIN games g ON pe.game_id = g.game_id
-            WHERE g.game_date <= CURRENT_DATE
-        """).fetchone()
-
-        if not date_row or not date_row[0]:
-            return {"date": None, "edges": [], "source": "none"}
-
-        target_date = date_row[0]
-        is_today = (str(target_date) == str(date.today()))
+        target_date = date.today()
 
         stat_filter = "AND pe.stat = ?" if stat else ""
-        params = [target_date, min_probability]
+        params = [str(target_date), min_probability]
         if stat:
             params.insert(1, stat)
 
@@ -594,12 +586,9 @@ def edges_today(min_probability: float = 0.6, stat: Optional[str] = None):
                     FROM player_game_stats
                 ) latest ON CAST(pe.player_id AS INTEGER) = latest.player_id AND latest.team_rn = 1
                 LEFT JOIN teams t ON latest.team_id = t.team_id
-                LEFT JOIN (
-                    SELECT player_id, points_mean, rebounds_mean, assists_mean,
-                           steals_mean, blocks_mean,
-                           ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) AS proj_rn
-                    FROM player_projections
-                ) pp ON pe.player_id = pp.player_id AND pp.proj_rn = 1
+                LEFT JOIN player_projections pp
+                    ON pe.player_id = pp.player_id
+                    AND pe.game_id  = pp.game_id
                 WHERE g.game_date = ?
                 {stat_filter}
                 AND pe.model_probability >= ?
@@ -613,7 +602,7 @@ def edges_today(min_probability: float = 0.6, stat: Optional[str] = None):
 
         # If no sportsbook rows, fall back to model_only
         if not rows:
-            params_mo = [target_date, min_probability]
+            params_mo = [str(target_date), min_probability]
             if stat:
                 params_mo.insert(1, stat)
             rows = conn.execute(_edge_query(""), params_mo).fetchall()
@@ -647,11 +636,29 @@ def edges_today(min_probability: float = 0.6, stat: Optional[str] = None):
 
         has_book_data = any(e["edge_percent"] is not None for e in edges)
 
+        # Pipeline readiness context for the frontend
+        today_str = str(target_date)
+        games_today = conn.execute(
+            "SELECT COUNT(*) FROM games WHERE game_date = ?", [today_str]
+        ).fetchone()[0]
+        upcoming_games = conn.execute(
+            "SELECT COUNT(*) FROM games WHERE game_date = ? AND status = 'Upcoming'", [today_str]
+        ).fetchone()[0]
+        has_props = conn.execute(
+            "SELECT COUNT(*) FROM sportsbook_props sp JOIN games g ON sp.game_id = g.game_id WHERE g.game_date = ?", [today_str]
+        ).fetchone()[0] > 0
+        has_sims = conn.execute(
+            "SELECT COUNT(*) FROM player_simulations ps JOIN games g ON ps.game_id = g.game_id WHERE g.game_date = ?", [today_str]
+        ).fetchone()[0] > 0
+
         return {
-            "date":          str(target_date),
-            "is_today":      is_today,
+            "date":          today_str,
             "source":        "sportsbook" if has_book_data else "model_only",
             "edges":         edges,
+            "games_today":   games_today,
+            "upcoming_games": upcoming_games,
+            "has_props":     has_props,
+            "has_sims":      has_sims,
         }
     finally:
         conn.close()
@@ -902,17 +909,44 @@ def matchup_flags(game_id: str, player_id: int = Query(...)):
 
 
 @app.get("/edges/best")
-def edges_best(limit: int = 100, min_edge: float = 0.0):
+def edges_best(
+    limit: int = 100,
+    min_edge: float = 0.0,
+    min_line: Optional[float] = None,
+    max_line: Optional[float] = None,
+):
     """
-    Best sportsbook line per prop for today, deduplicated by book.
+    All sportsbook lines per prop for today, grouped by (player, stat, line).
+    Each edge includes a nested books list with per-book odds and edge %.
     Ranked by bet_score = (edge_percent * 0.6) + (model_probability * 25).
+    Supports optional min_line / max_line filtering.
     """
     conn = get_connection()
     try:
-        df = get_best_edges(conn, limit=limit, min_edge=min_edge)
+        df = get_best_edges(conn, limit=limit, min_edge=min_edge, min_line=min_line, max_line=max_line)
 
         if df.empty:
-            return {"edges": []}
+            # Pipeline readiness context
+            today_str = str(date.today())
+            games_today = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE game_date = ?", [today_str]
+            ).fetchone()[0]
+            upcoming_games = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE game_date = ? AND status = 'Upcoming'", [today_str]
+            ).fetchone()[0]
+            has_props = conn.execute(
+                "SELECT COUNT(*) FROM sportsbook_props sp JOIN games g ON sp.game_id = g.game_id WHERE g.game_date = ?", [today_str]
+            ).fetchone()[0] > 0
+            has_sims = conn.execute(
+                "SELECT COUNT(*) FROM player_simulations ps JOIN games g ON ps.game_id = g.game_id WHERE g.game_date = ?", [today_str]
+            ).fetchone()[0] > 0
+            return {
+                "edges": [],
+                "games_today": games_today,
+                "upcoming_games": upcoming_games,
+                "has_props": has_props,
+                "has_sims": has_sims,
+            }
 
         stat_mean_col = {
             "points":   "points_mean",
@@ -922,32 +956,52 @@ def edges_best(limit: int = 100, min_edge: float = 0.0):
             "blocks":   "blocks_mean",
         }
 
-        edges = []
+        # Group all book rows by (game_id, player_id, stat, line)
+        prop_map: dict = {}
         for _, row in df.iterrows():
             stat = row["stat"]
-            mean_col = stat_mean_col.get(stat)
-            projection = float(row[mean_col]) if mean_col and row[mean_col] is not None and not (isinstance(row[mean_col], float) and math.isnan(row[mean_col])) else None
-            line_diff = round(projection - float(row["line"]), 2) if projection is not None else None
+            key = (row["game_id"], row["player_id"], stat, float(row["line"]))
 
-            matchup = f"{row['away_team_abbr']} @ {row['home_team_abbr']}"
+            if key not in prop_map:
+                mean_col = stat_mean_col.get(stat)
+                projection = float(row[mean_col]) if mean_col and row[mean_col] is not None and not (isinstance(row[mean_col], float) and math.isnan(row[mean_col])) else None
+                line_val = float(row["line"])
+                line_diff = round(projection - line_val, 2) if projection is not None else None
+                matchup = f"{row['away_team_abbr']} @ {row['home_team_abbr']}"
 
-            edges.append({
-                "game_id":      row["game_id"],
-                "player_id":    row["player_id"],
-                "player":       row["player_name"],
-                "matchup":      matchup,
-                "stat":         stat,
-                "line":         float(row["line"]),
-                "projection":   projection,
-                "line_diff":    line_diff,
-                "probability":  round(float(row["model_probability"]), 4),
-                "fair_odds":    int(row["fair_odds"]) if row["fair_odds"] is not None else None,
-                "best_book":    row["book"],
-                "best_odds":    int(row["sportsbook_odds"]) if row["sportsbook_odds"] is not None else None,
+                prop_map[key] = {
+                    "game_id":      row["game_id"],
+                    "player_id":    row["player_id"],
+                    "player":       row["player_name"],
+                    "matchup":      matchup,
+                    "home_team":    row["home_team_abbr"],
+                    "away_team":    row["away_team_abbr"],
+                    "game_status":  row["game_status"],
+                    "game_time_et": row["game_time_et"] if row["game_time_et"] is not None and not (isinstance(row["game_time_et"], float) and math.isnan(row["game_time_et"])) else None,
+                    "stat":         stat,
+                    "line":         line_val,
+                    "projection":   projection,
+                    "line_diff":    line_diff,
+                    "probability":  round(float(row["model_probability"]), 4),
+                    "fair_odds":    int(row["fair_odds"]) if row["fair_odds"] is not None else None,
+                    "books":        [],
+                    "best_edge":    round(float(row["edge_percent"]), 2),
+                    "score":        round(float(row["bet_score"]), 2),
+                }
+
+            prop_map[key]["books"].append({
+                "book":         row["book"],
+                "odds":         int(row["sportsbook_odds"]) if row["sportsbook_odds"] is not None else None,
                 "edge_percent": round(float(row["edge_percent"]), 2),
-                "score":        round(float(row["bet_score"]), 2),
             })
 
+        # Sort books within each prop by edge desc; ensure prop list ordered by score desc
+        edges = []
+        for entry in prop_map.values():
+            entry["books"].sort(key=lambda b: b["edge_percent"], reverse=True)
+            edges.append(entry)
+
+        edges.sort(key=lambda e: e["score"], reverse=True)
         return {"edges": edges}
     finally:
         conn.close()
@@ -988,5 +1042,742 @@ def get_projection_explanation(player_id: int, stat: str = Query(default="points
             "top_negative": negative,
             "source": "shap",
         }
+    finally:
+        conn.close()
+
+
+@app.get("/debug/shap/{player_id}")
+def debug_shap(player_id: int, stat: str = Query(default="points")):
+    """
+    Recompute SHAP on-demand for a player/stat and return full diagnostics:
+    feature contributions, model baseline, prediction, and input feature values.
+    """
+    conn = get_connection()
+    try:
+        from backend.models.stat_models.stat_models import (
+            _MODEL_CACHE, STAT_FEATURES, compute_shap_contributions,
+            _enrich_with_game_context,
+        )
+
+        if not _MODEL_CACHE:
+            raise HTTPException(
+                status_code=503,
+                detail="Model cache is empty — run the projection pipeline first."
+            )
+
+        # Load this player's feature row
+        rows = conn.execute("""
+            SELECT pf.*
+            FROM player_features pf
+            JOIN games g ON pf.game_id = g.game_id
+            WHERE pf.player_id = CAST(? AS TEXT)
+              AND g.game_date = CURRENT_DATE
+            LIMIT 1
+        """, [player_id]).df()
+
+        if rows.empty:
+            # Fallback: most recent feature row
+            rows = conn.execute("""
+                SELECT * FROM player_features
+                WHERE player_id = CAST(? AS TEXT)
+                ORDER BY game_id DESC
+                LIMIT 1
+            """, [player_id]).df()
+
+        if rows.empty:
+            raise HTTPException(status_code=404, detail="No feature row found for player.")
+
+        # Enrich with game context
+        rows = _enrich_with_game_context(rows, conn)
+
+        row = rows.iloc[0]
+        pos_group = row.get("position_group", "Forward")
+
+        # Find model
+        cache_key = (stat, pos_group)
+        if cache_key not in _MODEL_CACHE:
+            cache_key = (stat, "all")
+        if cache_key not in _MODEL_CACHE:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No trained model for stat={stat} position={pos_group}. "
+                       f"Available: {list(_MODEL_CACHE.keys())}"
+            )
+
+        model = _MODEL_CACHE[cache_key]
+        feat_cols = STAT_FEATURES.get(stat, [])
+        available = [c for c in feat_cols if c in rows.columns]
+        X_row = pd.DataFrame([row[available].fillna(0.0).values], columns=available)
+
+        shap_result = compute_shap_contributions(
+            model, X_row, available,
+            player_id=player_id, stat=stat, position_group=pos_group,
+        )
+
+        # Build feature values dict
+        feature_values = {col: float(X_row[col].iloc[0]) for col in available if col in X_row.columns}
+
+        contributions_sorted = sorted(
+            shap_result["contributions"].items(),
+            key=lambda x: abs(x[1]),
+            reverse=True,
+        )
+
+        return {
+            "player_id": player_id,
+            "stat": stat,
+            "position_group": pos_group,
+            "model_key": list(cache_key),
+            "base_value": round(shap_result["base_value"], 4),
+            "prediction": round(shap_result["prediction"], 4),
+            "shap_sum": round(sum(shap_result["contributions"].values()) + shap_result["base_value"], 4),
+            "feature_count": len(available),
+            "model_feature_count": len(model.feature_name()),
+            "contributions": [
+                {"feature": f, "shap_value": round(v, 4), "feature_value": feature_values.get(f)}
+                for f, v in contributions_sorted
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Debug SHAP failed for player %s stat %s: %s", player_id, stat, e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+# ── Model Health ──────────────────────────────────────────────────────────
+
+@app.get("/model/backtests")
+def model_backtests():
+    """Aggregated backtest metrics by stat from model_backtests table."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT stat,
+                   SUM(n_predictions)   AS total_predictions,
+                   ROUND(AVG(hit_rate), 4)    AS avg_hit_rate,
+                   ROUND(AVG(brier_score), 4) AS avg_brier,
+                   ROUND(AVG(log_loss), 4)    AS avg_log_loss,
+                   ROUND(AVG(roi), 2)         AS avg_roi,
+                   ROUND(AVG(avg_edge), 4)    AS avg_edge,
+                   MAX(run_date)        AS last_run
+            FROM model_backtests
+            GROUP BY stat
+            ORDER BY stat
+        """).fetchall()
+
+        return {
+            "stats": [
+                {
+                    "stat":              r[0],
+                    "total_predictions": int(r[1]),
+                    "avg_hit_rate":      float(r[2]),
+                    "avg_brier":         float(r[3]),
+                    "avg_log_loss":      float(r[4]),
+                    "avg_roi":           float(r[5]),
+                    "avg_edge":          float(r[6]),
+                    "last_run":          r[7],
+                }
+                for r in rows
+            ]
+        }
+    except Exception:
+        return {"stats": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/performance")
+def model_performance():
+    """Live betting performance from bet_results (CLV tracker)."""
+    try:
+        from backend.models.clv_tracker import get_performance_summary
+        summary = get_performance_summary()
+        return summary
+    except Exception as e:
+        logger.warning("Performance summary unavailable: %s", e)
+        return {
+            "total_bets": 0, "wins": 0, "losses": 0, "pushes": 0,
+            "roi": 0.0, "avg_clv": 0.0, "brier_score": None, "log_loss": None,
+        }
+
+
+@app.get("/model/feature-importance")
+def model_feature_importance(stat: str = Query(default="points")):
+    """Global LightGBM feature importance (gain-based) for a stat, from DB."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT feature, importance, position_group
+            FROM model_feature_importance
+            WHERE stat = ?
+            ORDER BY importance DESC
+            LIMIT 15
+        """, [stat]).fetchall()
+        if not rows:
+            return {"stat": stat, "features": [], "message": "No feature importance data. Run the projection pipeline to train models."}
+        return {
+            "stat": stat,
+            "features": [{"feature": r[0], "importance": round(float(r[1]), 2)} for r in rows],
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/model/projection-accuracy")
+def model_projection_accuracy():
+    """MAE and RMSE of projections vs actuals for completed games."""
+    conn = get_connection()
+    try:
+        # player_projections has columns: points_mean, rebounds_mean, etc.
+        # player_game_logs has: points, rebounds, assists, steals, blocks
+        stats_config = [
+            ("points",   "points_mean",   "points"),
+            ("rebounds", "rebounds_mean",  "rebounds"),
+            ("assists",  "assists_mean",   "assists"),
+            ("steals",   "steals_mean",    "steals"),
+            ("blocks",   "blocks_mean",    "blocks"),
+        ]
+        results = []
+        for stat_name, proj_col, actual_col in stats_config:
+            row = conn.execute(f"""
+                SELECT
+                    ROUND(AVG(ABS(pp.{proj_col} - pgl.{actual_col})), 2) AS mae,
+                    ROUND(SQRT(AVG(POW(pp.{proj_col} - pgl.{actual_col}, 2))), 2) AS rmse,
+                    COUNT(*) AS n
+                FROM player_projections pp
+                JOIN player_game_logs pgl
+                    ON pp.game_id = pgl.game_id AND pp.player_id = pgl.player_id
+                JOIN games g ON pp.game_id = g.game_id
+                WHERE g.status = 'Final'
+                  AND pp.{proj_col} IS NOT NULL
+                  AND pgl.{actual_col} IS NOT NULL
+            """).fetchone()
+            if row and row[2] > 0:
+                results.append({
+                    "stat": stat_name,
+                    "mae":  float(row[0]),
+                    "rmse": float(row[1]),
+                    "n":    int(row[2]),
+                })
+        return {"accuracy": results}
+    except Exception as e:
+        logger.warning("Projection accuracy unavailable: %s", e)
+        return {"accuracy": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/calibration")
+def model_calibration(stat: str = Query(default="points")):
+    """
+    Calibration curve: predicted probability bins vs actual hit rates.
+    Computed from player_simulations vs player_game_logs actuals.
+    """
+    conn = get_connection()
+    try:
+        df = conn.execute(f"""
+            SELECT ps.probability,
+                   CASE WHEN pgl.{stat} >= ps.line THEN 1.0 ELSE 0.0 END AS hit
+            FROM player_simulations ps
+            JOIN player_game_logs pgl
+                ON ps.game_id = pgl.game_id AND ps.player_id = pgl.player_id
+            JOIN games g ON ps.game_id = g.game_id
+            WHERE ps.stat = ?
+              AND g.status = 'Final'
+              AND pgl.{stat} IS NOT NULL
+        """, [stat]).df()
+
+        if df.empty:
+            return {"stat": stat, "bins": [], "ece": None}
+
+        import numpy as np
+        n_bins = 10
+        edges = np.linspace(0, 1, n_bins + 1)
+        bins = []
+        ece = 0.0
+        n_total = len(df)
+
+        for i in range(n_bins):
+            mask = (df["probability"] >= edges[i]) & (df["probability"] < edges[i + 1])
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            pred_avg = float(df.loc[mask, "probability"].mean())
+            actual_avg = float(df.loc[mask, "hit"].mean())
+            ece += (count / n_total) * abs(pred_avg - actual_avg)
+            bins.append({
+                "bin_center": round((edges[i] + edges[i + 1]) / 2, 2),
+                "predicted":  round(pred_avg, 4),
+                "actual":     round(actual_avg, 4),
+                "count":      count,
+            })
+
+        return {"stat": stat, "bins": bins, "ece": round(ece, 4)}
+    except Exception as e:
+        logger.warning("Calibration unavailable: %s", e)
+        return {"stat": stat, "bins": [], "ece": None}
+    finally:
+        conn.close()
+
+
+@app.get("/model/drift")
+def model_drift(stat: str = Query(default="points")):
+    """Projection error (actual - predicted) over time, grouped by game date."""
+    conn = get_connection()
+    try:
+        col_map = {"points": "points_mean", "rebounds": "rebounds_mean",
+                    "assists": "assists_mean", "steals": "steals_mean", "blocks": "blocks_mean"}
+        proj_col = col_map.get(stat, "points_mean")
+        rows = conn.execute(f"""
+            SELECT DATE(g.game_date) AS game_date,
+                   ROUND(AVG(pgl.{stat} - pp.{proj_col}), 2) AS error,
+                   COUNT(*) AS n
+            FROM player_projections pp
+            JOIN player_game_logs pgl ON pp.game_id = pgl.game_id AND pp.player_id = pgl.player_id
+            JOIN games g ON g.game_id = pp.game_id
+            WHERE g.status = 'Final' AND pp.{proj_col} IS NOT NULL
+            GROUP BY DATE(g.game_date)
+            ORDER BY game_date
+        """).fetchall()
+        return {"stat": stat, "drift": [{"date": str(r[0]), "error": float(r[1]), "n": int(r[2])} for r in rows]}
+    except Exception as e:
+        logger.warning("Drift unavailable: %s", e)
+        return {"stat": stat, "drift": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/edge-realization")
+def model_edge_realization():
+    """ROI bucketed by model probability bands from bet_results."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                CASE
+                    WHEN model_probability < 0.55 THEN '50-55%'
+                    WHEN model_probability < 0.60 THEN '55-60%'
+                    WHEN model_probability < 0.65 THEN '60-65%'
+                    WHEN model_probability < 0.70 THEN '65-70%'
+                    ELSE '70%+'
+                END AS bucket,
+                COUNT(*) AS count,
+                ROUND(AVG(CASE WHEN result='win' THEN profit ELSE -stake END), 2) AS avg_profit
+            FROM bet_results
+            WHERE model_probability >= 0.50
+            GROUP BY bucket
+            ORDER BY bucket
+        """).fetchall()
+        return {"buckets": [{"range": r[0], "count": int(r[1]), "roi": float(r[2])} for r in rows]}
+    except Exception:
+        return {"buckets": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/projection-distribution")
+def model_projection_distribution(stat: str = Query(default="points")):
+    """Histogram of projected stat means across all players."""
+    conn = get_connection()
+    try:
+        col_map = {"points": "points_mean", "rebounds": "rebounds_mean",
+                    "assists": "assists_mean", "steals": "steals_mean", "blocks": "blocks_mean"}
+        col = col_map.get(stat, "points_mean")
+        rows = conn.execute(f"""
+            SELECT
+                CASE
+                    WHEN {col} < 5 THEN '0-5'
+                    WHEN {col} < 10 THEN '5-10'
+                    WHEN {col} < 15 THEN '10-15'
+                    WHEN {col} < 20 THEN '15-20'
+                    WHEN {col} < 25 THEN '20-25'
+                    WHEN {col} < 30 THEN '25-30'
+                    WHEN {col} < 35 THEN '30-35'
+                    ELSE '35+'
+                END AS range,
+                COUNT(*) AS count
+            FROM player_projections
+            WHERE {col} IS NOT NULL
+            GROUP BY range
+            ORDER BY range
+        """).fetchall()
+        return {"stat": stat, "bins": [{"range": r[0], "count": int(r[1])} for r in rows]}
+    except Exception as e:
+        logger.warning("Projection distribution unavailable: %s", e)
+        return {"stat": stat, "bins": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/global-drivers")
+def model_global_drivers(stat: str = Query(default="points")):
+    """Top features by average absolute SHAP contribution across all players."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT feature, ROUND(AVG(ABS(contribution)), 4) AS avg_shap
+            FROM projection_explanations
+            WHERE stat = ?
+            GROUP BY feature
+            ORDER BY avg_shap DESC
+            LIMIT 15
+        """, [stat]).fetchall()
+        return {
+            "stat": stat,
+            "drivers": [{"feature": r[0], "avg_shap": float(r[1])} for r in rows],
+        }
+    except Exception as e:
+        logger.warning("Global drivers unavailable: %s", e)
+        return {"stat": stat, "drivers": []}
+    finally:
+        conn.close()
+
+
+@app.get("/model/shrinkage-diagnostics")
+def model_shrinkage_diagnostics(stat: str = Query(default="points"), limit: int = 25):
+    """Players with the largest Bayesian shrinkage adjustments."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT psp.player_id, p.full_name, psp.stat,
+                   psp.player_mean, psp.posterior_mean, psp.prior_mean,
+                   psp.n_games, psp.position_group,
+                   ROUND(ABS(psp.posterior_mean - psp.player_mean), 4) AS shrinkage_delta
+            FROM player_stat_posteriors psp
+            LEFT JOIN players p ON CAST(psp.player_id AS INTEGER) = p.player_id
+            WHERE psp.stat = ?
+            ORDER BY shrinkage_delta DESC
+            LIMIT ?
+        """, [stat, limit]).fetchall()
+        return {
+            "stat": stat,
+            "players": [
+                {
+                    "player_id": r[0],
+                    "player_name": r[1] or f"Player {r[0]}",
+                    "stat": r[2],
+                    "player_mean": float(r[3]),
+                    "posterior_mean": float(r[4]),
+                    "prior_mean": float(r[5]),
+                    "n_games": int(r[6]),
+                    "position_group": r[7],
+                    "shrinkage_delta": float(r[8]),
+                }
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        logger.warning("Shrinkage diagnostics unavailable: %s", e)
+        return {"stat": stat, "players": []}
+    finally:
+        conn.close()
+
+
+# ── Bet Tracking Endpoints ────────────────────────────────────────────────────
+
+@app.get("/bets/recent")
+def bets_recent(limit: int = 200, stat: Optional[str] = None, position: Optional[str] = None):
+    """Return recent tracked bets from model_recommendations with optional filters."""
+    conn = get_connection()
+    try:
+        where_clauses = []
+        params = []
+        if stat:
+            where_clauses.append("mr.stat = ?")
+            params.append(stat)
+        if position:
+            where_clauses.append("mr.player_position = ?")
+            params.append(position)
+        where_sql = (" AND " + " AND ".join(where_clauses)) if where_clauses else ""
+        params.append(limit)
+
+        rows = conn.execute(f"""
+            SELECT
+                mr.timestamp_generated,
+                mr.player_name,
+                mr.team,
+                mr.stat,
+                mr.line,
+                mr.sportsbook,
+                mr.odds,
+                mr.model_probability,
+                mr.edge_percent,
+                mr.confidence_score,
+                mr.actual_stat,
+                mr.result,
+                mr.closing_line,
+                mr.closing_odds,
+                mr.model_version,
+                g.game_date,
+                g.home_team_abbr,
+                g.away_team_abbr,
+                mr.game_id,
+                mr.player_id,
+                mr.player_position,
+                mr.opponent_team
+            FROM model_recommendations mr
+            LEFT JOIN games g ON mr.game_id = g.game_id
+            WHERE 1=1{where_sql}
+            ORDER BY mr.timestamp_generated DESC
+            LIMIT ?
+        """, params).fetchall()
+
+        bets = []
+        for r in rows:
+            bets.append({
+                "timestamp": str(r[0]) if r[0] else None,
+                "player": r[1],
+                "team": r[2],
+                "stat": r[3],
+                "line": float(r[4]) if r[4] is not None else None,
+                "sportsbook": r[5],
+                "odds": int(r[6]) if r[6] is not None else None,
+                "probability": round(float(r[7]), 4) if r[7] is not None else None,
+                "edge": round(float(r[8]), 2) if r[8] is not None else None,
+                "confidence": round(float(r[9]), 2) if r[9] is not None else None,
+                "actual": float(r[10]) if r[10] is not None else None,
+                "result": r[11],
+                "closing_line": float(r[12]) if r[12] is not None else None,
+                "closing_odds": int(r[13]) if r[13] is not None else None,
+                "model_version": r[14],
+                "date": str(r[15]) if r[15] else None,
+                "matchup": f"{r[17]} @ {r[16]}" if r[16] and r[17] else None,
+                "game_id": r[18],
+                "player_id": r[19],
+                "position": r[20],
+                "opponent": r[21],
+            })
+        return {"bets": bets, "count": len(bets)}
+    finally:
+        conn.close()
+
+
+@app.get("/bets/performance")
+def bets_performance():
+    """Return aggregate performance metrics for tracked bets."""
+    conn = get_connection()
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM model_recommendations").fetchone()[0]
+        wins = conn.execute("SELECT COUNT(*) FROM model_recommendations WHERE result = 'win'").fetchone()[0]
+        losses = conn.execute("SELECT COUNT(*) FROM model_recommendations WHERE result = 'loss'").fetchone()[0]
+        pushes = conn.execute("SELECT COUNT(*) FROM model_recommendations WHERE result = 'push'").fetchone()[0]
+        pending = conn.execute("SELECT COUNT(*) FROM model_recommendations WHERE result IS NULL").fetchone()[0]
+
+        resolved = wins + losses + pushes
+        win_rate = round(wins / resolved * 100, 1) if resolved > 0 else 0.0
+
+        # ROI: assume $100 per bet, standard -110 juice
+        # Win pays profit based on actual odds; loss costs $100
+        roi_row = conn.execute("""
+            SELECT
+                SUM(CASE
+                    WHEN result = 'win' AND odds > 0 THEN odds
+                    WHEN result = 'win' AND odds < 0 THEN CAST(10000.0 / ABS(odds) AS DOUBLE)
+                    WHEN result = 'loss' THEN -100
+                    ELSE 0
+                END) AS net_profit,
+                SUM(CASE WHEN result IN ('win', 'loss') THEN 100 ELSE 0 END) AS total_risked
+            FROM model_recommendations
+            WHERE result IS NOT NULL AND result != 'push'
+        """).fetchone()
+        net_profit = float(roi_row[0]) if roi_row[0] else 0.0
+        total_risked = float(roi_row[1]) if roi_row[1] else 0.0
+        roi = round(net_profit / total_risked * 100, 1) if total_risked > 0 else 0.0
+
+        # Average CLV
+        clv_row = conn.execute("""
+            SELECT AVG(closing_line - line)
+            FROM model_recommendations
+            WHERE closing_line IS NOT NULL AND result IS NOT NULL
+        """).fetchone()
+        avg_clv = round(float(clv_row[0]), 2) if clv_row[0] is not None else None
+
+        return {
+            "total_bets": total,
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "pending": pending,
+            "win_rate": win_rate,
+            "roi": roi,
+            "avg_clv": avg_clv,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/bets/by-model")
+def bets_by_model():
+    """Return performance metrics grouped by model version."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                model_version,
+                COUNT(*) AS total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN result = 'push' THEN 1 ELSE 0 END) AS pushes,
+                SUM(CASE
+                    WHEN result = 'win' AND odds > 0 THEN odds
+                    WHEN result = 'win' AND odds < 0 THEN CAST(10000.0 / ABS(odds) AS DOUBLE)
+                    WHEN result = 'loss' THEN -100
+                    ELSE 0
+                END) AS net_profit,
+                SUM(CASE WHEN result IN ('win', 'loss') THEN 100 ELSE 0 END) AS total_risked,
+                AVG(CASE WHEN closing_line IS NOT NULL AND result IS NOT NULL
+                    THEN closing_line - line ELSE NULL END) AS avg_clv
+            FROM model_recommendations
+            GROUP BY model_version
+            ORDER BY model_version DESC
+        """).fetchall()
+
+        models = []
+        for r in rows:
+            resolved = (r[2] or 0) + (r[3] or 0) + (r[4] or 0)
+            win_rate = round(r[2] / resolved * 100, 1) if resolved > 0 else 0.0
+            roi = round(float(r[5]) / float(r[6]) * 100, 1) if r[6] and float(r[6]) > 0 else 0.0
+            models.append({
+                "model_version": r[0],
+                "bets": r[1],
+                "wins": r[2] or 0,
+                "losses": r[3] or 0,
+                "pushes": r[4] or 0,
+                "win_rate": win_rate,
+                "roi": roi,
+                "avg_clv": round(float(r[7]), 2) if r[7] is not None else None,
+            })
+        return {"models": models}
+    finally:
+        conn.close()
+
+
+@app.get("/bets/by-type")
+def bets_by_type():
+    """Return performance metrics grouped by stat type."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                stat,
+                COUNT(*) AS total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE
+                    WHEN result = 'win' AND odds > 0 THEN odds
+                    WHEN result = 'win' AND odds < 0 THEN CAST(10000.0 / ABS(odds) AS DOUBLE)
+                    WHEN result = 'loss' THEN -100
+                    ELSE 0
+                END) AS net_profit,
+                SUM(CASE WHEN result IN ('win', 'loss') THEN 100 ELSE 0 END) AS total_risked
+            FROM model_recommendations
+            GROUP BY stat
+            ORDER BY stat
+        """).fetchall()
+
+        result = []
+        for r in rows:
+            resolved = (r[2] or 0) + (r[3] or 0)
+            win_rate = round(r[2] / resolved * 100, 1) if resolved > 0 else 0.0
+            roi = round(float(r[4]) / float(r[5]) * 100, 1) if r[5] and float(r[5]) > 0 else 0.0
+            result.append({
+                "stat": r[0],
+                "bets": r[1],
+                "wins": r[2] or 0,
+                "losses": r[3] or 0,
+                "win_rate": win_rate,
+                "roi": roi,
+            })
+        return {"types": result}
+    finally:
+        conn.close()
+
+
+@app.get("/bets/by-position")
+def bets_by_position():
+    """Return performance metrics grouped by player position."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                player_position,
+                COUNT(*) AS total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE
+                    WHEN result = 'win' AND odds > 0 THEN odds
+                    WHEN result = 'win' AND odds < 0 THEN CAST(10000.0 / ABS(odds) AS DOUBLE)
+                    WHEN result = 'loss' THEN -100
+                    ELSE 0
+                END) AS net_profit,
+                SUM(CASE WHEN result IN ('win', 'loss') THEN 100 ELSE 0 END) AS total_risked
+            FROM model_recommendations
+            WHERE player_position IS NOT NULL
+            GROUP BY player_position
+            ORDER BY player_position
+        """).fetchall()
+
+        result = []
+        for r in rows:
+            resolved = (r[2] or 0) + (r[3] or 0)
+            win_rate = round(r[2] / resolved * 100, 1) if resolved > 0 else 0.0
+            roi = round(float(r[4]) / float(r[5]) * 100, 1) if r[5] and float(r[5]) > 0 else 0.0
+            result.append({
+                "position": r[0],
+                "bets": r[1],
+                "wins": r[2] or 0,
+                "losses": r[3] or 0,
+                "win_rate": win_rate,
+                "roi": roi,
+            })
+        return {"positions": result}
+    finally:
+        conn.close()
+
+
+@app.get("/bets/type-position-matrix")
+def bets_type_position_matrix():
+    """Return win rates by stat type AND player position."""
+    conn = get_connection()
+    try:
+        rows = conn.execute("""
+            SELECT
+                stat,
+                player_position,
+                COUNT(*) AS total,
+                SUM(CASE WHEN result = 'win' THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result = 'loss' THEN 1 ELSE 0 END) AS losses
+            FROM model_recommendations
+            WHERE player_position IS NOT NULL
+              AND result IS NOT NULL
+            GROUP BY stat, player_position
+            ORDER BY stat, player_position
+        """).fetchall()
+
+        result = []
+        for r in rows:
+            resolved = (r[3] or 0) + (r[4] or 0)
+            win_rate = round(r[3] / resolved * 100, 1) if resolved > 0 else 0.0
+            result.append({
+                "stat": r[0],
+                "position": r[1],
+                "bets": r[2],
+                "win_rate": win_rate,
+            })
+        return {"matrix": result}
+    finally:
+        conn.close()
+
+
+@app.post("/bets/reset")
+def bets_reset():
+    """Delete all tracked bet history."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM model_recommendations")
+        return {"status": "tracking reset"}
     finally:
         conn.close()

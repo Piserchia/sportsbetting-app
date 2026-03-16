@@ -57,8 +57,9 @@ _MODEL_CACHE: dict = {}
 STAT_FEATURES = {
     "points": [
         "minutes_projection",
-        "points_avg_last_5",
+        "points_recent_adj",
         "points_avg_last_10",
+        "points_posterior",
         "season_avg_points",
         "usage_proxy",
         "pace_adjustment_factor",
@@ -72,8 +73,9 @@ STAT_FEATURES = {
     ],
     "rebounds": [
         "minutes_projection",
-        "rebounds_avg_last_5",
+        "rebounds_recent_adj",
         "rebounds_avg_last_10",
+        "rebounds_posterior",
         "season_avg_rebounds",
         "pace_adjustment_factor",
         "defense_adj_reb",
@@ -85,8 +87,9 @@ STAT_FEATURES = {
     ],
     "assists": [
         "minutes_projection",
-        "assists_avg_last_5",
+        "assists_recent_adj",
         "assists_avg_last_10",
+        "assists_posterior",
         "season_avg_assists",
         "usage_proxy",
         "pace_adjustment_factor",
@@ -100,8 +103,9 @@ STAT_FEATURES = {
     ],
     "steals": [
         "minutes_projection",
-        "steals_avg_last_5",
+        "steals_recent_adj",
         "steals_avg_last_10",
+        "steals_posterior",
         "season_avg_steals",
         "pace_adjustment_factor",
         "defense_adj_stl",
@@ -112,8 +116,9 @@ STAT_FEATURES = {
     ],
     "blocks": [
         "minutes_projection",
-        "blocks_avg_last_5",
+        "blocks_recent_adj",
         "blocks_avg_last_10",
+        "blocks_posterior",
         "season_avg_blocks",
         "pace_adjustment_factor",
         "defense_adj_blk",
@@ -173,25 +178,22 @@ def _train_lgbm(X: pd.DataFrame, y: pd.Series, stat: str):
 def _weighted_avg_fallback(
     features_df: pd.DataFrame, stat: str
 ) -> np.ndarray:
-    """Original formula as fallback.
+    """Fallback formula using recent_adj + L10 + season avg.
     Supports: points, rebounds, assists, steals, blocks.
     """
-    # steals/blocks use singular column names; others use plural (e.g. rebounds_avg_last_5)
-    singular_stats = {"assists", "steals", "blocks"}
-    if stat in singular_stats:
-        l10_col = f"{stat}_avg_last_10"
-        l5_col  = f"{stat}_avg_last_5"
-        sea_col = f"season_avg_{stat}"
-    else:
-        l10_col = f"{stat}s_avg_last_10"
-        l5_col  = f"{stat}s_avg_last_5"
-        sea_col = f"season_avg_{stat}s"
+    adj_col = f"{stat}_recent_adj"
+    l10_col = f"{stat}_avg_last_10"
+    post_col = f"{stat}_posterior"
+    sea_col = f"season_avg_{stat}"
 
+    adj = features_df.get(adj_col, pd.Series(0.0, index=features_df.index))
     l10 = features_df.get(l10_col, pd.Series(0.0, index=features_df.index))
-    l5  = features_df.get(l5_col,  pd.Series(0.0, index=features_df.index))
+    # Prefer Bayesian posterior over raw season avg when available
+    post = features_df.get(post_col, pd.Series(0.0, index=features_df.index))
     sea = features_df.get(sea_col, pd.Series(0.0, index=features_df.index))
+    baseline = post.where(post > 0, sea)  # use posterior if available, else season avg
 
-    base = 0.5 * l10 + 0.3 * l5 + 0.2 * sea
+    base = 0.5 * l10 + 0.3 * adj + 0.2 * baseline
 
     # context adjustments
     pace = features_df.get("pace_adjustment_factor",
@@ -279,19 +281,100 @@ def _enrich_with_game_context(
     return df
 
 
-def compute_shap_contributions(model, X_row, feature_names):
-    """Compute SHAP feature contributions for a single prediction row."""
+def compute_shap_contributions(model, X_row, feature_names,
+                                player_id=None, stat=None, position_group=None):
+    """
+    Compute SHAP feature contributions for a single prediction row.
+
+    Returns dict with keys:
+        'contributions': {feature: float}
+        'base_value': float  (expected value / model intercept)
+        'prediction': float  (model.predict value for the row)
+    Raises on failure — callers must handle exceptions.
+    """
+    import shap
+
+    # ── Feature alignment: ensure X_row matches model's expected features ──
+    model_features = model.feature_name()
+    input_features = list(X_row.columns)
+
+    missing = set(model_features) - set(input_features)
+    extra   = set(input_features) - set(model_features)
+
+    if missing:
+        logger.error(
+            "SHAP feature mismatch — missing columns",
+            extra={"player_id": player_id, "stat": stat,
+                   "missing": sorted(missing), "model_features": len(model_features),
+                   "input_features": len(input_features)}
+        )
+    if extra:
+        logger.debug(
+            "SHAP dropping extra columns not in model: %s", sorted(extra)
+        )
+
+    # Reorder / subset to match model exactly (fill missing with 0)
+    X_aligned = pd.DataFrame(columns=model_features)
+    for col in model_features:
+        X_aligned[col] = X_row[col].values if col in X_row.columns else [0.0]
+
+    logger.debug(
+        "SHAP computing: player_id=%s stat=%s position=%s features=%d model_features=%d",
+        player_id, stat, position_group, len(input_features), len(model_features)
+    )
+
     try:
-        import shap
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_row)
+        shap_values = explainer.shap_values(X_aligned)
+
         if len(shap_values.shape) == 1:
             vals = shap_values
         else:
             vals = shap_values[0]
-        return dict(zip(feature_names, [float(v) for v in vals]))
-    except Exception:
-        return {}
+
+        base_value = float(explainer.expected_value)
+        prediction = float(model.predict(X_aligned)[0])
+
+        contributions = dict(zip(model_features, [float(v) for v in vals]))
+
+        # ── Validation: SHAP additivity check ──
+        shap_sum = sum(float(v) for v in vals) + base_value
+        diff_pct = abs(shap_sum - prediction) / max(abs(prediction), 1e-6) * 100
+        if diff_pct > 1.0:
+            logger.warning(
+                "SHAP additivity drift: player_id=%s stat=%s "
+                "shap_sum=%.4f prediction=%.4f diff=%.2f%%",
+                player_id, stat, shap_sum, prediction, diff_pct
+            )
+
+        return {
+            "contributions": contributions,
+            "base_value": base_value,
+            "prediction": prediction,
+        }
+
+    except Exception as e:
+        logger.error(
+            "SHAP computation failed: player_id=%s stat=%s position=%s error=%s",
+            player_id, stat, position_group, str(e)
+        )
+        raise
+
+
+def _persist_feature_importance(conn, stat, position_group, model, feature_names):
+    """Persist LightGBM feature importance to DB for API access without model cache."""
+    imps = model.feature_importance(importance_type="gain")
+    from datetime import datetime
+    version = datetime.now().strftime("%Y%m%d_%H%M")
+    conn.execute(
+        "DELETE FROM model_feature_importance WHERE stat = ? AND position_group = ?",
+        [stat, position_group]
+    )
+    for feat, imp in zip(feature_names, imps):
+        conn.execute(
+            "INSERT INTO model_feature_importance VALUES (?,?,?,?,?,current_timestamp)",
+            [stat, position_group, feat, float(imp), version]
+        )
 
 
 def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFrame:
@@ -341,6 +424,37 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
         .copy()
     )
 
+    # ── Remap game_id to upcoming game for each player ──────────────────
+    # Features are keyed to the player's last completed game, but projections
+    # must be keyed to the upcoming game (matching sportsbook_props game_ids).
+    upcoming_games = conn.execute("""
+        SELECT g.game_id, pgs.player_id
+        FROM games g
+        JOIN (
+            SELECT DISTINCT player_id, team_id
+            FROM player_game_stats
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) = 1
+        ) pgs ON g.home_team_id = pgs.team_id OR g.away_team_id = pgs.team_id
+        WHERE g.game_date >= CURRENT_DATE AND g.status != 'Final'
+    """).df()
+
+    if not upcoming_games.empty:
+        upcoming_games["player_id"] = upcoming_games["player_id"].astype(str)
+        # Keep first upcoming game per player
+        upcoming_map = upcoming_games.drop_duplicates("player_id").set_index("player_id")["game_id"]
+        latest["upcoming_game_id"] = latest["player_id"].map(upcoming_map)
+        # Only project players who have an upcoming game
+        has_upcoming = latest["upcoming_game_id"].notna()
+        n_dropped = (~has_upcoming).sum()
+        if n_dropped > 0:
+            logger.info(f"  Skipping {n_dropped} players with no upcoming game.")
+        latest = latest[has_upcoming].copy()
+        latest["game_id"] = latest["upcoming_game_id"]
+        latest.drop(columns=["upcoming_game_id"], inplace=True)
+        logger.info(f"  Projecting {len(latest)} players with upcoming games.")
+    else:
+        logger.warning("  No upcoming games found — projections will use historical game_ids.")
+
     result = latest[["game_id", "player_id"]].copy()
     result["minutes_projection"] = latest.get(
         "minutes_projection",
@@ -388,6 +502,7 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
                 try:
                     model = _train_lgbm(X_pos, y_pos, f"{stat}/{pos_group}")
                     _MODEL_CACHE[cache_key] = model
+                    _persist_feature_importance(conn, stat, pos_group, model, available)
                 except Exception as e:
                     logger.warning(f"  [{stat}/{pos_group}] LightGBM failed: {e}")
             else:
@@ -400,6 +515,7 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
             try:
                 model = _train_lgbm(X_train_all, y_train_all, f"{stat}/all")
                 _MODEL_CACHE[all_cache_key] = model
+                _persist_feature_importance(conn, stat, "all", model, available)
             except Exception as e:
                 logger.warning(f"  [{stat}/all] LightGBM failed: {e}")
 
@@ -444,7 +560,13 @@ def generate_ml_projections(conn=None, force_retrain: bool = False) -> pd.DataFr
 
 
 def _store_shap_explanations(conn, latest: pd.DataFrame, result: pd.DataFrame):
-    """Compute and store SHAP feature contributions for today's projected players."""
+    """Compute and store SHAP feature contributions for all projected players.
+
+    Uses the same `latest` DataFrame that projections were computed from —
+    one row per player with their most recent feature values.
+    The game_ids in `latest` are from each player's last completed game
+    (used as the feature source), NOT today's upcoming game_ids.
+    """
     if conn is None or _MODEL_CACHE is None or not _MODEL_CACHE:
         return
 
@@ -454,26 +576,20 @@ def _store_shap_explanations(conn, latest: pd.DataFrame, result: pd.DataFrame):
     except Exception:
         pass
 
-    # Filter to today's games only
-    try:
-        today_games = conn.execute(
-            "SELECT game_id FROM games WHERE game_date = CURRENT_DATE"
-        ).df()
-        if today_games.empty:
-            # Fall back: use the most recent game_id in result
-            today_game_ids = set(result["game_id"].unique()[:50])
-        else:
-            today_game_ids = set(today_games["game_id"].astype(str))
-    except Exception:
-        today_game_ids = set(result["game_id"].unique()[:50])
-
-    today_mask = latest["game_id"].isin(today_game_ids)
-    today_latest = latest[today_mask]
+    # Use all players that have projections in `result`
+    projected_player_ids = set(result["player_id"].astype(str))
+    today_latest = latest[latest["player_id"].astype(str).isin(projected_player_ids)]
 
     if today_latest.empty:
+        logger.warning("SHAP: no projected players found in latest features — skipping.")
         return
 
+    logger.info(f"  Computing SHAP explanations for {len(today_latest)} players...")
+
     explanation_rows = []
+    shap_failures = 0
+    shap_empty = 0
+
     for stat in ["points", "rebounds", "assists", "steals", "blocks"]:
         feat_cols = STAT_FEATURES[stat]
         available = [c for c in feat_cols if c in latest.columns]
@@ -490,7 +606,6 @@ def _store_shap_explanations(conn, latest: pd.DataFrame, result: pd.DataFrame):
 
             model = _MODEL_CACHE[cache_key]
             X_row = pd.DataFrame([row[available].fillna(0.0).values], columns=available)
-            contributions = compute_shap_contributions(model, X_row, available)
 
             game_id = str(row["game_id"])
             player_id = row["player_id"]
@@ -499,9 +614,31 @@ def _store_shap_explanations(conn, latest: pd.DataFrame, result: pd.DataFrame):
             except (ValueError, TypeError):
                 pass
 
+            try:
+                shap_result = compute_shap_contributions(
+                    model, X_row, available,
+                    player_id=player_id, stat=stat, position_group=pos_group,
+                )
+                contributions = shap_result["contributions"]
+            except Exception:
+                shap_failures += 1
+                continue
+
+            if not contributions:
+                shap_empty += 1
+                logger.warning(
+                    "No SHAP contributions for player %s stat %s", player_id, stat
+                )
+                continue
+
             for feature, value in contributions.items():
                 if abs(value) > 0.01:  # skip negligible contributions
                     explanation_rows.append((game_id, player_id, stat, feature, round(value, 4)))
+
+    if shap_failures:
+        logger.warning("  SHAP computation failed for %d player/stat combos", shap_failures)
+    if shap_empty:
+        logger.warning("  SHAP returned empty contributions for %d player/stat combos", shap_empty)
 
     if explanation_rows:
         try:
@@ -514,6 +651,8 @@ def _store_shap_explanations(conn, latest: pd.DataFrame, result: pd.DataFrame):
             logger.info(f"  → {len(explanation_rows)} SHAP explanations stored.")
         except Exception as e:
             logger.warning(f"  SHAP storage failed: {e}")
+    else:
+        logger.warning("  No SHAP explanations generated — projection_explanations not updated.")
 
 
 def get_feature_importances() -> dict[str, pd.DataFrame]:
