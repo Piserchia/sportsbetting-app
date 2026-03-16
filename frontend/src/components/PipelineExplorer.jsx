@@ -152,6 +152,24 @@ const STAGES = [
       "Ranks edges by bet_score = (edge * 0.6) + (probability * 25)",
     ],
   },
+  {
+    key: "tracking",
+    label: "Bet Tracking",
+    icon: "📋",
+    color: "#6366f1",
+    colorBg: "#eef2ff",
+    purpose: "Log qualifying edges as tracked bets, resolve results, and evaluate model performance.",
+    inputs: ["prop_edges", "player_game_stats (actuals)"],
+    outputs: ["model_recommendations — tracked bets with results"],
+    example: "A +8% edge on LeBron 24.5+ points at -110 is logged. After the game, his 28 pts resolves as a win.",
+    details: [
+      "Qualifying criteria: edge >= 3% AND model probability >= 55%",
+      "Tracks player position (PG/SG/SF/PF/C) and opponent team",
+      "update_bet_results.py resolves pending bets against actual box scores",
+      "Performance analytics: win rate, ROI, Brier score by stat type and position",
+      "Closing line value (CLV) tracking for model evaluation",
+    ],
+  },
 ];
 
 // ── Feature Groups (from feature_schema.yaml) ────────────────────────────────
@@ -242,6 +260,19 @@ const FEATURE_GROUPS = [
       "usage_delta_teammate_out",
       "assist_delta_teammate_out",
       "rebound_delta_teammate_out",
+    ],
+  },
+  {
+    name: "Bayesian Shrinkage",
+    icon: "📐",
+    color: T.danger,
+    description: "Position-group priors stabilize small-sample baselines (k=20)",
+    features: [
+      "points_posterior",
+      "rebounds_posterior",
+      "assists_posterior",
+      "steals_posterior",
+      "blocks_posterior",
     ],
   },
 ];

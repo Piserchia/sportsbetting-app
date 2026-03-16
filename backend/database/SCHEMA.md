@@ -29,6 +29,7 @@
 | first_name | VARCHAR | |
 | last_name | VARCHAR | |
 | is_active | BOOLEAN | |
+| position | VARCHAR | G, F, or C — captured from box score starter data |
 | updated_at | TIMESTAMP | DEFAULT current_timestamp |
 
 ### games

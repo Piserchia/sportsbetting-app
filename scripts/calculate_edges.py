@@ -178,17 +178,27 @@ def _log_recommendations(conn, edges_df: pd.DataFrame):
         name_lookup = {}
         team_lookup = {}
 
-    # Look up player positions from player_features
+    # Look up player positions — prefer players.position (from box scores),
+    # fall back to player_features.player_position (stat-inferred)
+    position_lookup = {}
     try:
-        pos_info = conn.execute("""
+        feat_pos = conn.execute("""
             SELECT player_id, player_position
             FROM player_features
             WHERE player_position IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_id DESC) = 1
         """).df()
-        position_lookup = dict(zip(pos_info["player_id"].astype(str), pos_info["player_position"]))
+        position_lookup = dict(zip(feat_pos["player_id"].astype(str), feat_pos["player_position"]))
     except Exception:
-        position_lookup = {}
+        pass
+    try:
+        real_pos = conn.execute("""
+            SELECT player_id, position FROM players WHERE position IS NOT NULL
+        """).df()
+        real_pos_map = dict(zip(real_pos["player_id"].astype(str), real_pos["position"]))
+        position_lookup.update(real_pos_map)
+    except Exception:
+        pass
 
     # Look up game info for opponent resolution
     try:

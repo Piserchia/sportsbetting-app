@@ -15,6 +15,16 @@ Sub-modules that compute individual feature groups. Called by `backend/models/fe
 | `usage_features.py` | Usage proxy | `usage_proxy`, `usage_trend_last_5` |
 | `lineup_features.py` | Teammate impact | `*_delta_teammate_out` |
 
+### Additional Feature Modules (in `backend/models/`)
+
+These modules live in `backend/models/` and are called directly by `feature_builder.py`:
+
+| File | Feature Group | Output Columns |
+|------|--------------|---------------|
+| `bayesian_shrinkage.py` | Bayesian posteriors | `*_posterior` (k=20 shrinkage toward position-group priors) |
+| `positional_defense_features.py` | Positional defense | `defense_vs_pg/sg/sf/pf/c`, `positional_defense_adj_*` |
+| `advanced_defense_features.py` | Advanced ratings | `team_off_rating`, `opponent_def_rating`, `rating_matchup_factor` |
+
 ## Tables Consumed
 
 - `player_game_logs` (primary input)

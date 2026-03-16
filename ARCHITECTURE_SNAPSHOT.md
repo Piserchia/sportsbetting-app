@@ -86,7 +86,11 @@ sportsbetting-app/
 │       │   ├── EdgesDashboard.jsx
 │       │   ├── EdgesDashboard2.jsx
 │       │   ├── PipelineStatus.jsx
-│       │   └── PropDashboard.jsx
+│       │   ├── PropDashboard.jsx
+│       │   ├── PipelineExplorer.jsx
+│       │   ├── ProjectionDebugger.jsx
+│       │   ├── BetPerformanceDashboard.jsx
+│       │   └── ModelHealthDashboard.jsx
 │       └── main.jsx
 ├── scripts/
 │   ├── backtest_model.py
@@ -150,7 +154,7 @@ sportsbetting-app/
 - Dependencies: all DB tables, `backend/models/edges_query.py`, `backend/database/connection.py`
 
 **backend/database/**
-- Purpose: DuckDB connection management and schema initialization (21 tables)
+- Purpose: DuckDB connection management and schema initialization (26 tables)
 - Key files: `connection.py`, `SCHEMA.md`
 - Dependencies: none (foundational)
 
@@ -172,7 +176,7 @@ sportsbetting-app/
 
 **frontend/src/components/**
 - Purpose: React dashboard (player props, edges, pipeline status)
-- Key files: `PropDashboard.jsx`, `EdgesDashboard.jsx`, `EdgesDashboard2.jsx`, `PipelineStatus.jsx`
+- Key files: `PropDashboard.jsx`, `EdgesDashboard.jsx`, `EdgesDashboard2.jsx`, `PipelineStatus.jsx`, `BetPerformanceDashboard.jsx`, `PipelineExplorer.jsx`, `ProjectionDebugger.jsx`, `ModelHealthDashboard.jsx`
 - Dependencies: FastAPI at `http://localhost:8000`
 
 ---
@@ -197,7 +201,10 @@ MODEL PHASE
 10. build_player_features()         → player_features
 11. generate_projections()          → player_projections, player_distributions
 12. simulate_player_props()         → player_simulations
-13. calculate_edges()               → prop_edges
+13. calculate_edges()               → prop_edges, model_recommendations
+
+BET TRACKING PHASE
+14. update_bet_results.py            → model_recommendations (result resolution)
 ```
 
 **Scheduling (--schedule flag):**
@@ -207,7 +214,7 @@ MODEL PHASE
 
 ---
 
-## 4. Database Tables (21 total)
+## 4. Database Tables (26 total)
 
 **Core data (init_schema)**
 
@@ -244,6 +251,11 @@ MODEL PHASE
 | sportsbook_props | prop_id (TEXT) | Latest prop line snapshot |
 | prop_line_history | history_id (TEXT) | Append-only prop line log |
 | bet_results | bet_id (TEXT) | Bet outcomes + CLV tracking |
+| model_recommendations | bet_id (TEXT) | Tracked bet recommendations with results |
+| model_versions | version (TEXT) | Model version registry |
+| model_feature_importance | (stat, position_group, feature) | LightGBM feature importance per model |
+| projection_explanations | (game_id, player_id, stat, feature) | SHAP contribution values |
+| player_stat_posteriors | (player_id, stat) | Bayesian shrinkage posteriors |
 
 ---
 
@@ -280,6 +292,11 @@ SportsGameOdds API                             │
                                                            │
                                                            ▼
                                                      React Dashboard
+                                                           │
+                                                           ▼
+                                            update_bet_results.py
+                                                    └─→ model_recommendations (result resolution)
+                                                    └─→ FastAPI /bets/* endpoints
 ```
 
 ---

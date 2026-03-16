@@ -99,9 +99,11 @@ Projections are keyed to the **upcoming game_id** (not the last completed game):
 
 | Stat | v1 | v2 |
 |------|----|----|
-| Points | Normal | **Log-normal** (right-skewed, bounded at 0) |
+| Points | Normal | **Gamma** (right-skewed, better tail behavior) |
 | Rebounds | Normal | **Negative Binomial** (count data, overdispersed) |
 | Assists | Normal | **Negative Binomial** (count data, overdispersed) |
+| Steals | Normal | **Negative Binomial** (rare count events) |
+| Blocks | Normal | **Negative Binomial** (rare count events) |
 
 **Combo props (PRA/PR/PA)** use a **Gaussian copula** with Spearman rank
 correlations, applying each stat's proper marginal distribution via PPF inversion.
@@ -114,7 +116,7 @@ This correctly captures the correlation structure without forcing normal margina
 **File:** `backend/models/positional_defense_features.py`
 
 Extends team-level defense adjustments to 5 position groups (PG/SG/SF/PF/C).
-Position is inferred from stat ratios (rebounds → big, assists → guard).
+Position data comes from NBA box scores (`players.position`) when available, with stat-ratio inference as fallback.
 
 Rolling 10-game allowed stats per team per position produce:
 `defense_vs_pg`, `defense_vs_sg`, `defense_vs_sf`, `defense_vs_pf`, `defense_vs_c`,
@@ -163,7 +165,39 @@ python scripts/run_projections.py          # ML models with fallback
 python scripts/simulate_props.py           # lognormal/negbin/copula
 python scripts/calculate_edges.py
 python scripts/backtest_model.py
+python scripts/update_bet_results.py   # resolve pending bets
 ```
+
+---
+
+## 8. Bet Tracking & Model Evaluation
+
+**Table:** `model_recommendations`
+**Script:** `scripts/update_bet_results.py`
+
+### Qualification Criteria
+
+Edges are logged as tracked bets when:
+- `edge_percent >= 3.0%`
+- `model_probability >= 0.55`
+
+Each recommendation records: player, stat, line, sportsbook, odds, model probability, edge, confidence score, `player_position`, and `opponent_team`.
+
+### Result Resolution
+
+`update_bet_results.py` resolves pending bets by joining against actual `player_game_stats`:
+- Compares `actual_stat` against `line` to determine win/loss/push
+- Captures `closing_line` and `closing_odds` for CLV tracking
+
+### Analytics
+
+API endpoints provide performance breakdowns:
+- `/bets/performance` — overall win rate, ROI, Brier score
+- `/bets/by-type` — performance grouped by stat type
+- `/bets/by-position` — performance grouped by player position
+- `/bets/type-position-matrix` — win rate heatmap (stat × position)
+
+---
 
 ## Fallback Chain
 

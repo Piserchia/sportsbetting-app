@@ -63,7 +63,7 @@ NBA API + SportsGameOdds API
 - **Location:** `data/sportsbetting.db`
 - **Engine:** DuckDB (embedded SQL, no server)
 - **Schema docs:** [`backend/database/SCHEMA.md`](backend/database/SCHEMA.md)
-- **21 tables** across raw data, features, simulations, and edge detection
+- **26 tables** across raw data, features, simulations, edge detection, and bet tracking
 
 ## Directory Structure
 
@@ -109,7 +109,7 @@ See [`REPO_MAP.md`](REPO_MAP.md) for the full file listing.
 | Models | [`backend/models/CONTEXT.md`](backend/models/CONTEXT.md) | Projections, simulations, feature orchestration |
 | API | [`backend/api/CONTEXT.md`](backend/api/CONTEXT.md) | REST endpoints serving the React frontend |
 | Frontend | [`frontend/CONTEXT.md`](frontend/CONTEXT.md) | React dashboard for props, edges, pipeline status |
-| Database | [`backend/database/SCHEMA.md`](backend/database/SCHEMA.md) | All 21 table schemas |
+| Database | [`backend/database/SCHEMA.md`](backend/database/SCHEMA.md) | All 26 table schemas |
 | Pipeline | [`PIPELINE.md`](PIPELINE.md) | Full pipeline execution order |
 | Contracts | `backend/contracts/` | Schema contracts for database, features, and projections |
 

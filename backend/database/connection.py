@@ -37,6 +37,12 @@ def _run_migrations(conn: duckdb.DuckDBPyConnection):
     except Exception:
         pass
 
+    # Add position column to players table if missing
+    try:
+        conn.execute("ALTER TABLE players ADD COLUMN position VARCHAR")
+    except Exception:
+        pass
+
     # Migrate player_features: replace *_avg_last_5 with *_recent_adj
     try:
         cols = [r[0] for r in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name='player_features'").fetchall()]
@@ -72,6 +78,7 @@ def init_schema(conn: duckdb.DuckDBPyConnection):
             first_name      VARCHAR,
             last_name       VARCHAR,
             is_active       BOOLEAN,
+            position        VARCHAR,
             updated_at      TIMESTAMP DEFAULT current_timestamp
         )
     """)

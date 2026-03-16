@@ -427,6 +427,13 @@ def ingest_box_scores(season: str, limit: Optional[int] = None, conn=None, force
                 ])
                 player_records += 1
 
+                # Update player position from starter data
+                raw_pos = str(p.get("position", "")).strip()
+                if raw_pos:
+                    conn.execute("""
+                        UPDATE players SET position = ? WHERE player_id = ? AND (position IS NULL OR position != ?)
+                    """, [raw_pos, int(p["personId"]), raw_pos])
+
             for _, t in team_df.iterrows():
                 stat_id = f"{game_id}_{t['teamId']}"
                 home_row = conn.execute(

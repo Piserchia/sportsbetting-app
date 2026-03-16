@@ -67,17 +67,20 @@ def build_positional_defense_features(conn=None) -> pd.DataFrame:
     conn  = conn or get_connection()
 
     try:
-        # Step 1: Infer player positions from season averages
+        # Step 1: Get player positions — prefer players.position (from box scores),
+        # fall back to stat-based inference
         try:
             player_avg = conn.execute("""
                 SELECT
-                    CAST(player_id AS TEXT) AS player_id,
-                    AVG(CAST(pts AS DOUBLE))  AS avg_pts,
-                    AVG(CAST(reb AS DOUBLE))  AS avg_reb,
-                    AVG(CAST(ast AS DOUBLE))  AS avg_ast
-                FROM player_game_stats
-                WHERE pts IS NOT NULL
-                GROUP BY player_id
+                    CAST(pgs.player_id AS TEXT) AS player_id,
+                    AVG(CAST(pgs.pts AS DOUBLE))  AS avg_pts,
+                    AVG(CAST(pgs.reb AS DOUBLE))  AS avg_reb,
+                    AVG(CAST(pgs.ast AS DOUBLE))  AS avg_ast,
+                    p.position AS real_position
+                FROM player_game_stats pgs
+                LEFT JOIN players p ON pgs.player_id = p.player_id
+                WHERE pgs.pts IS NOT NULL
+                GROUP BY pgs.player_id, p.position
             """).df()
         except Exception:
             player_avg = pd.DataFrame()
@@ -86,15 +89,21 @@ def build_positional_defense_features(conn=None) -> pd.DataFrame:
             return pd.DataFrame()
 
         def infer_position(row) -> str:
+            # Use real position from players table if available
+            real_pos = row.get("real_position")
+            if real_pos and not pd.isna(real_pos):
+                return _normalize_position(str(real_pos))
             if pd.isna(row.get("avg_reb")) or pd.isna(row.get("avg_ast")):
                 return "SF"
             reb = float(row["avg_reb"])
             ast = float(row["avg_ast"])
-            if reb >= 7.0:
-                return "C" if reb >= 9.0 else "PF"
-            if ast >= 6.0:
+            if reb >= 8.0:
+                return "C"
+            if reb >= 5.5 and ast < 3.5:
+                return "PF"
+            if ast >= 5.0:
                 return "PG"
-            if ast >= 4.0:
+            if ast >= 2.5 and reb < 4.5:
                 return "SG"
             return "SF"
 

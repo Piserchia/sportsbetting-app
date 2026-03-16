@@ -63,7 +63,7 @@ sportsbetting-app/
 │   │   └── app.py                   # FastAPI server (all REST endpoints + projection explanations + bet analytics by type/position)
 │   │
 │   ├── database/
-│   │   ├── connection.py            # DuckDB connection + schema init (21 tables)
+│   │   ├── connection.py            # DuckDB connection + schema init (26 tables)
 │   │   └── SCHEMA.md               # Database schema documentation
 │   │
 │   ├── analysis/
@@ -101,7 +101,9 @@ sportsbetting-app/
 │           ├── PipelineExplorer.jsx  # Visual pipeline education page
 │           ├── EdgesDashboard.jsx    # Best +EV edges across today's slate
 │           ├── PipelineStatus.jsx    # Pipeline monitoring dashboard
-│           └── BetPerformanceDashboard.jsx # Bet tracking: performance cards, recent bets, model comparison
+│           ├── BetPerformanceDashboard.jsx # Bet tracking: performance cards, recent bets, model comparison
+│           ├── ModelHealthDashboard.jsx # Model health monitoring and diagnostics
+│           └── EdgesDashboard2.jsx  # Alternate edges dashboard view
 │
 ├── config/
 │   ├── .env                         # API keys, DB path, ingestion settings
